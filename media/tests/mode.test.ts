@@ -19,6 +19,7 @@ import { withEnv } from './helpers.js';
 const CLEAN = {
 	KEELSON_MODE: undefined,
 	KEELSON_APP_ID: undefined,
+	KEELSON_WORKSPACE_ID: undefined,
 	KEELSON_TENANT_ID: undefined,
 	KEELSON_DEPLOY_ID: undefined,
 	KEELSON_INTERNAL_MEDIA_BASE_URL: undefined,
@@ -39,7 +40,8 @@ const MSG = {
 		'the Media capability is unavailable for this deployment.',
 	refuseFallback:
 		'Platform environment detected ' +
-		'(KEELSON_APP_ID / KEELSON_TENANT_ID / KEELSON_DEPLOY_ID set) but Media is not configured; ' +
+		'(KEELSON_APP_ID / KEELSON_WORKSPACE_ID (or deprecated KEELSON_TENANT_ID alias) / ' +
+		'KEELSON_DEPLOY_ID set) but Media is not configured; ' +
 		'refusing to fall back to local storage. Set KEELSON_MODE=local for local development.',
 	unknownMode: (mode: string) =>
 		`Unrecognized KEELSON_MODE="${mode}"; expected "keelson" or "local" ` +
@@ -129,6 +131,13 @@ describe('resolveMode contract', () => {
 
 	it('refuses local fallback when only KEELSON_TENANT_ID visible', async () => {
 		await withEnv({ ...CLEAN, KEELSON_TENANT_ID: 'tnt_1' }, async () => {
+			const { resolveMode } = await import('../src/config.js');
+			expect(messageOf(() => resolveMode())).toBe(MSG.refuseFallback);
+		});
+	});
+
+	it('refuses local fallback when only KEELSON_WORKSPACE_ID visible', async () => {
+		await withEnv({ ...CLEAN, KEELSON_WORKSPACE_ID: 'wsp_1' }, async () => {
 			const { resolveMode } = await import('../src/config.js');
 			expect(messageOf(() => resolveMode())).toBe(MSG.refuseFallback);
 		});

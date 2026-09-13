@@ -21,6 +21,18 @@ export function getApiUrl(): string {
   return url;
 }
 
+/** App-scoped gateway base URL, when the platform has enabled that route. */
+export function getEmailBaseUrl(): string | null {
+  const url = process.env.KEELSON_EMAIL_BASE_URL?.trim().replace(/\/+$/, "");
+  return url || null;
+}
+
+/** Resolve the send endpoint as one inseparable base URL and path pair. */
+export function getSendUrl(): string {
+  const baseUrl = getEmailBaseUrl();
+  return baseUrl ? `${baseUrl}/__keelson/email/send` : `${getApiUrl()}/v1/email/send`;
+}
+
 export function getToken(): string {
   const token = process.env.KEELSON_EMAIL_TOKEN?.trim();
   if (!token) {
@@ -51,7 +63,12 @@ export function getMode(): string {
  * Keelson and activates fail-closed behavior. Mirrors the Media SDK's platform
  * detection.
  */
-const CORE_IDENTIFIER_ENVS = ["KEELSON_APP_ID", "KEELSON_TENANT_ID", "KEELSON_DEPLOY_ID"] as const;
+const CORE_IDENTIFIER_ENVS = [
+  "KEELSON_APP_ID",
+  "KEELSON_WORKSPACE_ID",
+  "KEELSON_TENANT_ID",
+  "KEELSON_DEPLOY_ID",
+] as const;
 
 /** True when any platform-owned core identifier is visible (running on Keelson). */
 export function isPlatformEnv(): boolean {
@@ -67,8 +84,9 @@ export function isPlatformEnv(): boolean {
  * - `KEELSON_MODE=keelson` → required.
  * - `KEELSON_MODE=local` → not required (local development accepts unsigned).
  * - `KEELSON_MODE` unset but a platform environment is detected
- *   (`KEELSON_APP_ID` / `KEELSON_TENANT_ID` / `KEELSON_DEPLOY_ID`) → required, so
- *   a misconfigured platform deploy never silently accepts unsigned payloads.
+ *   (`KEELSON_APP_ID` / `KEELSON_WORKSPACE_ID` / `KEELSON_DEPLOY_ID`; the former
+ *   `KEELSON_TENANT_ID` name remains a deprecated alias) → required, so a
+ *   misconfigured platform deploy never silently accepts unsigned payloads.
  * - `KEELSON_MODE` unset and no platform env → not required (zero-config local dev).
  * - Any other non-empty mode → required (fail closed on an unrecognized mode).
  */

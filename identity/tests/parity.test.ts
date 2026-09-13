@@ -62,8 +62,9 @@ describe("parity: identity current user", () => {
     expect(id!.user.email).toBe("taro@example.com");
     expect(id!.user.name).toBe("Taro Yamada");
 
-    expect(id!.tenant.id).toBe("tenant_001");
-    expect(id!.tenant.role).toBe("admin");
+    expect(id!.workspace.id).toBe("workspace_001");
+    expect(id!.workspace.role).toBe("admin");
+    expect(id!.workspace).toBe(id!.tenant);
 
     expect(id!.app.id).toBe("app_xyz");
     expect(id!.app.permissions).toEqual(["manage", "view"]);

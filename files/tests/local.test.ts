@@ -287,25 +287,21 @@ describe.skipIf(process.platform !== 'linux')('local backend', () => {
 		});
 	});
 
-	it('fails closed when no local backend is available', async () => {
-		// Inject platform-dependent inputs to exercise the non-Linux fail-closed
-		// branch through the public API: no portal works and the best-effort opt-in
-		// is absent.
+	it('uses the path backend when no descriptor portal is available', async () => {
 		setLocalStrategyForTests(() =>
 			resolveLocalStrategy({
 				platform: 'darwin',
-				allowBestEffort: false,
 				probePortal: async () => false,
+				detectNoFollowAny: async () => 0,
 			}),
 		);
 		try {
 			await withEnv(env, async () => {
-				await expect(write('k', 'v')).rejects.toThrow(FilesError);
-				await expect(read('k')).rejects.toThrow(
-					/KEELSON_FILES_ALLOW_BESTEFFORT_LOCAL/,
-				);
-				await expect(del('k')).rejects.toThrow(FilesError);
-				await expect(list()).rejects.toThrow(FilesError);
+				await write('k', 'v');
+				expect(dec(await read('k'))).toBe('v');
+				expect(await list()).toEqual(['k']);
+				await del('k');
+				expect(await read('k')).toBeNull();
 			});
 		} finally {
 			setLocalStrategyForTests(null);

@@ -19,13 +19,16 @@ export interface SpamAssessment {
   reasons: string[];
 }
 
-export interface InboundAttachmentMeta {
+export interface InboundAttachment {
   id: string;
   filename: string;
   content_type: string;
   size_bytes: number;
   download_url: string;
 }
+
+/** Backwards-compatible name retained for existing imports. */
+export type InboundAttachmentMeta = InboundAttachment;
 
 export interface InboundMessage {
   delivery_id: string;
@@ -45,7 +48,7 @@ export interface InboundMessage {
   envelope_to: string;
   authentication: AuthenticationResult;
   spam: SpamAssessment;
-  attachments: InboundAttachmentMeta[];
+  attachments: InboundAttachment[];
 }
 
 export interface Attachment {
@@ -78,6 +81,9 @@ export interface EmailEventPayload {
   event_id: string;
   event_type: "bounce" | "complaint" | "delivered";
   email_address: string;
+  provider?: string | null;
+  send_id?: string | null;
+  /** @deprecated Use send_id to correlate an event with a send. */
   resend_email_id: string | null;
   bounce_type: string | null;
   detail: string | null;

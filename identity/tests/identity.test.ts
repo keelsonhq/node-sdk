@@ -113,6 +113,25 @@ describe("getCurrentUser", () => {
       expect(result.email).toBe("dev@localhost");
     });
   });
+
+  it("prefers local workspace env over tenant aliases", async () => {
+    await withEnv(
+      {
+        KEELSON_LOCAL_MODE: "1",
+        KEELSON_LOCAL_WORKSPACE_ID: "workspace-id",
+        KEELSON_LOCAL_TENANT_ID: "tenant-id",
+        KEELSON_LOCAL_WORKSPACE_ROLE: "OWNER",
+        KEELSON_LOCAL_TENANT_ROLE: "BUILDER",
+      },
+      async () => {
+        const { getCurrentIdentity } = await import("../src/client.js");
+        const result = await getCurrentIdentity();
+        expect(result.workspace.id).toBe("workspace-id");
+        expect(result.workspace.role).toBe("OWNER");
+        expect(result.workspace).toBe(result.tenant);
+      },
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -128,6 +147,7 @@ describe("getCurrentIdentity", () => {
 
   const IDENTITY_PAYLOAD = {
     user: { id: "u-1", email: "test@example.com", name: "Test User" },
+    workspace: { id: "w-canonical", role: "OWNER" },
     tenant: { id: "t-1", role: "OWNER" },
     app: { id: "a-1", permissions: ["manage"], roles: [] },
     attributes: { groups: ["everyone", "owners"] },
@@ -154,6 +174,8 @@ describe("getCurrentIdentity", () => {
       expect(req.headers["host"]).toBe("myapp.keelson.run");
 
       expect(result.user.id).toBe("u-1");
+      expect(result.workspace.id).toBe("w-canonical");
+      expect(result.workspace).toBe(result.tenant);
       expect(result.tenant.role).toBe("OWNER");
       expect(result.app.permissions).toEqual(["manage"]);
       expect(result.attributes?.groups).toEqual(["everyone", "owners"]);

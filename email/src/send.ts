@@ -2,7 +2,7 @@
  * Email sending via the Keelson Email API.
  */
 
-import { getApiUrl, getAuthHeaders, EmailError } from "./config.js";
+import { getAuthHeaders, getSendUrl, EmailError } from "./config.js";
 import type { Attachment, SendOptions, SendResult } from "./types.js";
 
 function toAddressList(value: string | string[]): string[] {
@@ -35,7 +35,7 @@ export async function send(options: SendOptions): Promise<SendResult> {
     }));
   }
 
-  const url = `${getApiUrl()}/v1/email/send`;
+  const url = getSendUrl();
   const response = await fetch(url, {
     method: "POST",
     headers: {

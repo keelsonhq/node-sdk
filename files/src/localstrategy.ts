@@ -18,14 +18,13 @@
  *    backend performs, including that `O_NOFOLLOW` through the portal actually
  *    rejects a symlink. If one passes, the platform gets the same TOCTOU-safe
  *    backend Linux gets.
- * 3. **Other POSIX, no working portal** — a path-based best-effort backend,
- *    behind the explicit `KEELSON_FILES_ALLOW_BESTEFFORT_LOCAL=1` opt-in plus a
- *    stderr warning. It re-checks every component with `lstat` and opens with
- *    `O_NOFOLLOW`, but check-then-act windows remain on `mkdir` / `rename` /
- *    `unlink`, so it is never selected silently.
- * 4. **Windows** — unsupported, with no opt-in escape hatch: there is no
- *    `O_NOFOLLOW`, so not even a best-effort defence exists. Run local mode
- *    under WSL2 or a Linux devcontainer.
+ * 3. **Other POSIX, no working portal** — a path-based local-development
+ *    backend. It re-checks every component with `lstat` and opens files with a
+ *    no-symlink flag, but check-then-act windows remain on `mkdir` / `rename` /
+ *    `unlink` because Node exposes no descriptor-relative APIs.
+ * 4. **Windows** — the same path-based backend, with Windows filename checks.
+ *    Windows has no `O_NOFOLLOW`, so observed symlinks are rejected with
+ *    `lstat`; the remaining race limitation is acceptable for local dev.
  *
  * Nothing here is on the production code path: production is always
  * `KEELSON_MODE=keelson` (remote GCS) on Linux.
@@ -48,7 +47,6 @@ import {
 } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { allowBestEffortLocal, FilesError } from './config.js';
 
 type FileHandle = Awaited<ReturnType<typeof open>>;
 
@@ -231,7 +229,7 @@ export async function probeNoFollowAnyFlag(flag: number): Promise<boolean> {
 			// did not guard the path; any other errno is not evidence about symlink
 			// handling. Requiring ELOOP exactly is the conservative direction: if a
 			// real macOS were to reject with some other errno the flag is simply not
-			// adopted, and the backend runs without it. NOT verified on real macOS.
+			// adopted, and the backend runs without it.
 			if (
 				!(await openRejectedWith(
 					join(root, 'link', 'f'),
@@ -273,39 +271,13 @@ export async function detectNoFollowAny(opts: {
 
 export interface StrategyDeps {
 	platform: string;
-	allowBestEffort: boolean;
 	probePortal?: (portal: string) => Promise<boolean>;
 	detectNoFollowAny?: (platform: string) => Promise<number>;
-	warn?: (message: string) => void;
 	portals?: readonly string[];
 }
 
-const WINDOWS_MESSAGE =
-	'local file storage is not supported on Windows: the platform has no ' +
-	'O_NOFOLLOW, so path confinement cannot be enforced even on a best-effort ' +
-	'basis. Run local mode under WSL2 or a Linux devcontainer, or use ' +
-	'KEELSON_MODE=keelson (remote storage).';
-
-function unsupportedMessage(platform: string): string {
-	return (
-		`local file storage on "${platform}" could not find a working ` +
-		'descriptor-relative path portal ' +
-		`(${PORTAL_CANDIDATES.join(', ')}), which is required for TOCTOU-safe ` +
-		'path confinement. Set KEELSON_FILES_ALLOW_BESTEFFORT_LOCAL=1 to opt in ' +
-		'to a weaker path-based backend for local development, run local mode in ' +
-		'a Linux container, or use KEELSON_MODE=keelson (remote storage).'
-	);
-}
-
-const BEST_EFFORT_WARNING =
-	'[keelson/files] WARNING: using the best-effort local backend ' +
-	'(KEELSON_FILES_ALLOW_BESTEFFORT_LOCAL=1). Path confinement is re-checked ' +
-	'per component but is NOT TOCTOU-safe on this platform. Local development ' +
-	'only — never a production configuration.';
-
-/** Resolve the local backend for the given platform, or throw a `FilesError`
- * describing why local mode is unavailable. Every platform-dependent input is
- * injectable so non-Linux branches are unit-testable from Linux. */
+/** Resolve the local backend. Every platform-dependent input is injectable so
+ * non-Linux branches are unit-testable from Linux. */
 export async function resolveLocalStrategy(
 	deps: StrategyDeps,
 ): Promise<LocalStrategy> {
@@ -313,20 +285,13 @@ export async function resolveLocalStrategy(
 	if (deps.platform === 'linux') {
 		return { kind: 'portal', portal: '/proc/self/fd' };
 	}
-	if (deps.platform === 'win32') {
-		throw new FilesError(WINDOWS_MESSAGE);
+	if (deps.platform !== 'win32') {
+		const probe = deps.probePortal ?? probePortal;
+		for (const portal of deps.portals ?? PORTAL_CANDIDATES) {
+			if (await probe(portal)) return { kind: 'portal', portal };
+		}
 	}
 
-	const probe = deps.probePortal ?? probePortal;
-	for (const portal of deps.portals ?? PORTAL_CANDIDATES) {
-		if (await probe(portal)) return { kind: 'portal', portal };
-	}
-
-	if (!deps.allowBestEffort) {
-		throw new FilesError(unsupportedMessage(deps.platform));
-	}
-	const warn = deps.warn ?? ((m: string) => process.stderr.write(`${m}\n`));
-	warn(BEST_EFFORT_WARNING);
 	const detect =
 		deps.detectNoFollowAny ??
 		((p: string) => detectNoFollowAny({ platform: p }));
@@ -337,24 +302,17 @@ export async function resolveLocalStrategy(
 // Process-wide cache + test seam
 // ---------------------------------------------------------------------------
 
-let cacheKey: string | null = null;
 let cached: Promise<LocalStrategy> | null = null;
 let override: (() => Promise<LocalStrategy>) | null = null;
 
-/** Resolve (and memoize) the local backend for the current process. The probes
- * touch the filesystem, so this runs at most once per (platform, opt-in) pair. */
+/** Resolve (and memoize) the local backend for the current process. */
 export function getLocalStrategy(): Promise<LocalStrategy> {
 	if (override) return override();
-	const allowBestEffort = allowBestEffortLocal();
-	const key = `${process.platform}|${allowBestEffort}`;
-	if (cacheKey !== key || cached === null) {
-		cacheKey = key;
+	if (cached === null) {
 		cached = resolveLocalStrategy({
 			platform: process.platform,
-			allowBestEffort,
 		}).catch((err) => {
-			// Never memoize a failure: the operator may fix the env and retry.
-			cacheKey = null;
+			// Never memoize a transient filesystem-probe failure.
 			cached = null;
 			throw err;
 		});
@@ -368,6 +326,5 @@ export function setLocalStrategyForTests(
 	factory: (() => Promise<LocalStrategy>) | null,
 ): void {
 	override = factory;
-	cacheKey = null;
 	cached = null;
 }

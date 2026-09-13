@@ -22,7 +22,7 @@
  *   headers: req.headers,
  *   app_token: process.env.KEELSON_DIRECTORY_TOKEN,
  * });
- * console.log(identity.tenant.role, identity.app.permissions);
+ * console.log(identity.workspace.role, identity.app.permissions);
  *
  * const directory = { app_token: process.env.KEELSON_DIRECTORY_TOKEN };
  * const members = await listMembers({ ...directory, q: "alice" });
@@ -45,25 +45,26 @@
  * without network calls or request headers.
  */
 
-export { IdentityError } from "./config.js";
 export {
-  getCurrentIdentity,
-  getCurrentUser,
-  listMembers,
-  getUser,
-  listGroups
-} from "./client.js";
+	getCurrentIdentity,
+	getCurrentUser,
+	getUser,
+	listGroups,
+	listMembers,
+} from './client.js';
+export { IdentityError } from './config.js';
 export type {
-  AppIdentity,
-  AttributesIdentity,
-  CurrentIdentity,
-  GroupItem,
-  HeaderBag,
-  HeadersLike,
-  ListMembersOptions,
-  MemberItem,
-  PaginatedMembers,
-  RequestOptions,
-  TenantIdentity,
-  UserIdentity
-} from "./types.js";
+	AppIdentity,
+	AttributesIdentity,
+	CurrentIdentity,
+	GroupItem,
+	HeaderBag,
+	HeadersLike,
+	ListMembersOptions,
+	MemberItem,
+	PaginatedMembers,
+	RequestOptions,
+	TenantIdentity,
+	UserIdentity,
+	WorkspaceIdentity,
+} from './types.js';

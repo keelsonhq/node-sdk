@@ -117,10 +117,13 @@ describe('an unrelated open failure is never a rejection', () => {
 		},
 	);
 
-	it('probeNoFollowAnyFlag accepts a genuine ELOOP rejection', async () => {
-		// Injecting ELOOP exercises the documented accept path without assuming
-		// that the current kernel implements O_NOFOLLOW_ANY.
-		state.mode = { kind: 'errno', code: 'ELOOP' };
-		expect(await probeNoFollowAnyFlag(NOFOLLOW_ANY_CANDIDATE)).toBe(true);
-	});
+	it.skipIf(process.platform === 'win32')(
+		'probeNoFollowAnyFlag accepts a genuine ELOOP rejection',
+		async () => {
+			// Injecting ELOOP exercises the documented accept path without assuming
+			// that the current kernel implements O_NOFOLLOW_ANY.
+			state.mode = { kind: 'errno', code: 'ELOOP' };
+			expect(await probeNoFollowAnyFlag(NOFOLLOW_ANY_CANDIDATE)).toBe(true);
+		},
+	);
 });

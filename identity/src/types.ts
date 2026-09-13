@@ -13,10 +13,13 @@ export interface UserIdentity {
   name: string | null;
 }
 
-export interface TenantIdentity {
+export interface WorkspaceIdentity {
   id: string;
   role: string;
 }
+
+/** @deprecated Use WorkspaceIdentity. */
+export type TenantIdentity = WorkspaceIdentity;
 
 export interface AppIdentity {
   id: string;
@@ -30,6 +33,8 @@ export interface AttributesIdentity {
 
 export interface CurrentIdentity {
   user: UserIdentity;
+  workspace: WorkspaceIdentity;
+  /** @deprecated Use workspace. Retained through at least the next major version. */
   tenant: TenantIdentity;
   app: AppIdentity;
   attributes: AttributesIdentity | null;

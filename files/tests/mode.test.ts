@@ -5,6 +5,7 @@ import { withEnv } from './helpers.js';
 const CLEAN = {
 	KEELSON_MODE: undefined,
 	KEELSON_APP_ID: undefined,
+	KEELSON_WORKSPACE_ID: undefined,
 	KEELSON_TENANT_ID: undefined,
 	KEELSON_DEPLOY_ID: undefined,
 	KEELSON_FILES_BUCKET: undefined,
@@ -17,6 +18,18 @@ const REMOTE = {
 	KEELSON_APP_ID: 'a',
 	KEELSON_TENANT_ID: 't',
 } as const;
+
+const MISSING_IDENTITY_MESSAGE =
+	'KEELSON_MODE=keelson but the platform identity is missing ' +
+	'(KEELSON_APP_ID and KEELSON_WORKSPACE_ID must be set; ' +
+	'KEELSON_TENANT_ID remains a deprecated alias); ' +
+	'the Files capability is unavailable for this deployment.';
+const REFUSE_FALLBACK_MESSAGE =
+	'Platform environment detected ' +
+	'(KEELSON_APP_ID / KEELSON_WORKSPACE_ID (or deprecated KEELSON_TENANT_ID alias) / ' +
+	'KEELSON_DEPLOY_ID set) but KEELSON_MODE is unset; ' +
+	'refusing to fall back to local storage. Set KEELSON_MODE=local for local ' +
+	'development or KEELSON_MODE=keelson for platform storage.';
 
 function messageOf(fn: () => unknown): string | undefined {
 	try {
@@ -32,6 +45,21 @@ describe('resolveMode contract', () => {
 		await withEnv({ ...CLEAN, KEELSON_MODE: 'keelson', ...REMOTE }, () => {
 			expect(resolveMode()).toBe('remote');
 		});
+	});
+
+	it('remote in KEELSON_MODE=keelson with workspace identity', async () => {
+		await withEnv(
+			{
+				...CLEAN,
+				KEELSON_MODE: 'keelson',
+				...REMOTE,
+				KEELSON_WORKSPACE_ID: 'w',
+				KEELSON_TENANT_ID: undefined,
+			},
+			() => {
+				expect(resolveMode()).toBe('remote');
+			},
+		);
 	});
 
 	it('throws in keelson mode with missing env', async () => {
@@ -50,9 +78,7 @@ describe('resolveMode contract', () => {
 				KEELSON_FILES_PREFIX: 'tenants/t/apps/a/files/',
 			},
 			() => {
-				expect(messageOf(resolveMode)).toContain(
-					'platform identity is missing',
-				);
+				expect(messageOf(resolveMode)).toBe(MISSING_IDENTITY_MESSAGE);
 			},
 		);
 	});
@@ -93,12 +119,13 @@ describe('resolveMode contract', () => {
 
 	for (const v of [
 		'KEELSON_APP_ID',
+		'KEELSON_WORKSPACE_ID',
 		'KEELSON_TENANT_ID',
 		'KEELSON_DEPLOY_ID',
 	]) {
 		it(`refuses local fallback when ${v} visible`, async () => {
 			await withEnv({ ...CLEAN, [v]: 'x' }, () => {
-				expect(messageOf(resolveMode)).toContain('refusing to fall back');
+				expect(messageOf(resolveMode)).toBe(REFUSE_FALLBACK_MESSAGE);
 			});
 		});
 	}

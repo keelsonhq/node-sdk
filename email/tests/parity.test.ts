@@ -95,6 +95,8 @@ describe("parity: email event", () => {
     expect(evt.event_id).toBe("evt_parity01");
     expect(evt.event_type).toBe("bounce");
     expect(evt.email_address).toBe("bounced@example.com");
+    expect(evt.provider).toBe("resend");
+    expect(evt.send_id).toBe("550e8400-e29b-41d4-a716-446655440000");
     expect(evt.resend_email_id).toBe("re_001");
     expect(evt.bounce_type).toBe("hard");
     expect(evt.detail).toBe("Mailbox not found");

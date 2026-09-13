@@ -272,22 +272,23 @@ function requireString(obj: Record<string, unknown>, path: string): string {
 
 function parseIdentity(payload: Record<string, unknown>): CurrentIdentity {
   const userRaw = payload.user;
-  const tenantRaw = payload.tenant;
+  const workspaceKey = Object.hasOwn(payload, "workspace") ? "workspace" : "tenant";
+  const workspaceRaw = payload[workspaceKey];
   const appRaw = payload.app;
   if (typeof userRaw !== "object" || !userRaw)
     throw new IdentityError("Identity response is missing 'user'.");
-  if (typeof tenantRaw !== "object" || !tenantRaw)
-    throw new IdentityError("Identity response is missing 'tenant'.");
+  if (typeof workspaceRaw !== "object" || !workspaceRaw)
+    throw new IdentityError("Identity response is missing 'workspace'.");
   if (typeof appRaw !== "object" || !appRaw)
     throw new IdentityError("Identity response is missing 'app'.");
 
   const u = userRaw as Record<string, unknown>;
-  const t = tenantRaw as Record<string, unknown>;
+  const w = workspaceRaw as Record<string, unknown>;
   const a = appRaw as Record<string, unknown>;
 
   const userId = requireString(u, "id");
-  const tenantId = requireString(t, "id");
-  const tenantRole = requireString(t, "role");
+  const workspaceId = requireString(w, "id");
+  const workspaceRole = requireString(w, "role");
   const appId = requireString(a, "id");
 
   const email = u.email != null ? String(u.email) : null;
@@ -304,9 +305,11 @@ function parseIdentity(payload: Record<string, unknown>): CurrentIdentity {
     attributes = { groups };
   }
 
+  const workspace = { id: workspaceId, role: workspaceRole };
   return {
     user: { id: userId, email, name },
-    tenant: { id: tenantId, role: tenantRole },
+    workspace,
+    tenant: workspace,
     app: { id: appId, permissions, roles },
     attributes
   };

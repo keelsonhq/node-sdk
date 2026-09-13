@@ -8,8 +8,8 @@
  *   KEELSON_LOCAL_USER_ID      (default: "local-user-001")
  *   KEELSON_LOCAL_USER_EMAIL   (default: "dev@localhost")
  *   KEELSON_LOCAL_USER_NAME    (default: "Local Developer")
- *   KEELSON_LOCAL_TENANT_ID    (default: "local-tenant-001")
- *   KEELSON_LOCAL_TENANT_ROLE  (default: "OWNER")
+ *   KEELSON_LOCAL_WORKSPACE_ID   (tenant alias also accepted; default: "local-tenant-001")
+ *   KEELSON_LOCAL_WORKSPACE_ROLE (tenant alias also accepted; default: "OWNER")
  *   KEELSON_LOCAL_APP_ID       (default: "local-app-001")
  */
 
@@ -36,10 +36,16 @@ function localUserName(): string {
   return env("KEELSON_LOCAL_USER_NAME", "Local Developer");
 }
 function localTenantId(): string {
-  return env("KEELSON_LOCAL_TENANT_ID", "local-tenant-001");
+  return env(
+    "KEELSON_LOCAL_WORKSPACE_ID",
+    env("KEELSON_LOCAL_TENANT_ID", "local-tenant-001"),
+  );
 }
 function localTenantRole(): string {
-  return env("KEELSON_LOCAL_TENANT_ROLE", "OWNER");
+  return env(
+    "KEELSON_LOCAL_WORKSPACE_ROLE",
+    env("KEELSON_LOCAL_TENANT_ROLE", "OWNER"),
+  );
 }
 function localAppId(): string {
   return env("KEELSON_LOCAL_APP_ID", "local-app-001");
@@ -99,9 +105,11 @@ export function localGetCurrentUser(): UserIdentity {
 export function localGetCurrentIdentity(): CurrentIdentity {
   const role = localTenantRole();
   const groups = ROLE_GROUP_MAP[role] ?? ["everyone"];
+  const workspace = { id: localTenantId(), role };
   return {
     user: { id: localUserId(), email: localUserEmail(), name: localUserName() },
-    tenant: { id: localTenantId(), role },
+    workspace,
+    tenant: workspace,
     app: { id: localAppId(), permissions: ["manage", "view"], roles: [] },
     attributes: { groups },
   };

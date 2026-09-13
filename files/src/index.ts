@@ -25,12 +25,10 @@
  * - **Local mode** (development): files are stored on the local filesystem
  *   under `KEELSON_FILES_DIR` (default `./.keelson/files`).
  *
- * Local mode needs `openat`-equivalent path resolution for TOCTOU-safe
- * confinement, which Node's `fs` does not expose directly. Linux uses
- * `/proc/self/fd`; other POSIX platforms are probed at runtime and fall back to
- * an explicitly opted-in (`KEELSON_FILES_ALLOW_BESTEFFORT_LOCAL=1`) weaker
- * backend. Windows is unsupported for local mode — use WSL2 or a Linux
- * devcontainer. See `localstrategy.ts`.
+ * Linux uses a descriptor-relative backend through `/proc/self/fd`. macOS and
+ * Windows use a path-based local-development backend because Node's `fs` does
+ * not expose `openat`; it rejects observed symlinks and confines paths to the
+ * configured directory. See `localstrategy.ts`.
  *
  * `KEELSON_MODE` is the single mode signal and the SDK is fail-closed on
  * Keelson (never silently falls back to ephemeral local disk).

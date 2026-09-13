@@ -15,8 +15,9 @@
  * - When `KEELSON_MODE` is unset (local development), the SDK uses the
  *   internal API if both Media env values are present, otherwise local
  *   storage — but refuses that fallback when a platform environment is
- *   detected (any of `KEELSON_APP_ID` / `KEELSON_TENANT_ID` /
- *   `KEELSON_DEPLOY_ID` set), to avoid silent ephemeral writes.
+ *   detected (any of `KEELSON_APP_ID` / `KEELSON_WORKSPACE_ID` /
+ *   `KEELSON_DEPLOY_ID` set; `KEELSON_TENANT_ID` remains a deprecated alias),
+ *   to avoid silent ephemeral writes.
  * - Any other non-empty `KEELSON_MODE` is a configuration error.
  */
 
@@ -57,6 +58,7 @@ export function getMode(): string {
  */
 const CORE_IDENTIFIER_ENVS = [
 	'KEELSON_APP_ID',
+	'KEELSON_WORKSPACE_ID',
 	'KEELSON_TENANT_ID',
 	'KEELSON_DEPLOY_ID',
 ] as const;
@@ -119,7 +121,8 @@ export function resolveMode(): ResolvedMode {
 		if (isPlatformEnv()) {
 			throw new MediaError(
 				'Platform environment detected ' +
-					'(KEELSON_APP_ID / KEELSON_TENANT_ID / KEELSON_DEPLOY_ID set) but Media is not configured; ' +
+					'(KEELSON_APP_ID / KEELSON_WORKSPACE_ID (or deprecated KEELSON_TENANT_ID alias) / ' +
+					'KEELSON_DEPLOY_ID set) but Media is not configured; ' +
 					'refusing to fall back to local storage. Set KEELSON_MODE=local for local development.',
 			);
 		}

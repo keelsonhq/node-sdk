@@ -12,7 +12,7 @@
  *
  *   // Download attachments
  *   for (const att of msg.attachments) {
- *     const data = await email.downloadAttachment(att.download_url);
+ *     const data = await email.downloadAttachment(att);
  *     // save data...
  *   }
  *
@@ -33,8 +33,8 @@
  * });
  * ```
  *
- * The SDK automatically reads ``KEELSON_EMAIL_API_URL`` and
- * ``KEELSON_EMAIL_TOKEN`` from the environment.
+ * The SDK automatically reads ``KEELSON_EMAIL_BASE_URL``,
+ * ``KEELSON_EMAIL_API_URL``, and ``KEELSON_EMAIL_TOKEN`` from the environment.
  */
 
 export { EmailError } from "./config.js";
@@ -60,6 +60,7 @@ export type {
   AuthenticationResult,
   EmailEventPayload,
   EventHandler,
+  InboundAttachment,
   InboundAttachmentMeta,
   InboundMessage,
   ReceiveHandler,

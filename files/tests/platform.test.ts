@@ -6,8 +6,17 @@
  * runtime probes decide what each host actually supports.
  */
 
+import { mkdtemp, rm } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { FilesError } from '../src/config.js';
+import {
+	del,
+	list,
+	read,
+	validateWindowsLocalPath,
+	write,
+} from '../src/client.js';
 import {
 	detectNoFollowAny,
 	getLocalStrategy,
@@ -26,7 +35,6 @@ describe('resolveLocalStrategy', () => {
 		let probed = false;
 		const strategy = await resolveLocalStrategy({
 			platform: 'linux',
-			allowBestEffort: false,
 			probePortal: async () => {
 				probed = true;
 				return true;
@@ -36,10 +44,9 @@ describe('resolveLocalStrategy', () => {
 		expect(probed).toBe(false);
 	});
 
-	it('Linux ignores the best-effort opt-in (no way to weaken it)', async () => {
+	it('Linux always keeps the descriptor-relative backend', async () => {
 		const strategy = await resolveLocalStrategy({
 			platform: 'linux',
-			allowBestEffort: true,
 			probePortal: neverProbe,
 		});
 		expect(strategy).toEqual({ kind: 'portal', portal: '/proc/self/fd' });
@@ -48,7 +55,6 @@ describe('resolveLocalStrategy', () => {
 	it('a non-Linux platform with a working portal gets the TOCTOU-safe backend', async () => {
 		const strategy = await resolveLocalStrategy({
 			platform: 'darwin',
-			allowBestEffort: false,
 			portals: ['/dev/fd'],
 			probePortal: alwaysProbe,
 		});
@@ -59,7 +65,6 @@ describe('resolveLocalStrategy', () => {
 		const tried: string[] = [];
 		const strategy = await resolveLocalStrategy({
 			platform: 'freebsd',
-			allowBestEffort: false,
 			portals: ['/nope', '/dev/fd', '/proc/self/fd'],
 			probePortal: async (p) => {
 				tried.push(p);
@@ -70,53 +75,82 @@ describe('resolveLocalStrategy', () => {
 		expect(tried).toEqual(['/nope', '/dev/fd']);
 	});
 
-	it('fails closed without a portal when best-effort is not opted in', async () => {
-		const promise = resolveLocalStrategy({
-			platform: 'darwin',
-			allowBestEffort: false,
-			probePortal: neverProbe,
-		});
-		await expect(promise).rejects.toThrow(FilesError);
-		await expect(promise).rejects.toThrow(
-			/KEELSON_FILES_ALLOW_BESTEFFORT_LOCAL=1/,
-		);
-	});
-
-	it('falls back to best-effort only with the opt-in, and warns', async () => {
-		const warnings: string[] = [];
+	it('uses the path backend when a non-Linux portal is unavailable', async () => {
 		const strategy = await resolveLocalStrategy({
 			platform: 'darwin',
-			allowBestEffort: true,
+			probePortal: neverProbe,
+			detectNoFollowAny: async () => 0x2000_0000,
+		});
+		expect(strategy).toEqual({
+			kind: 'besteffort',
+			noFollowAny: 0x2000_0000,
+		});
+	});
+
+	it('uses the path backend without emitting a startup warning', async () => {
+		const strategy = await resolveLocalStrategy({
+			platform: 'darwin',
 			probePortal: neverProbe,
 			detectNoFollowAny: async () => 0,
-			warn: (m) => warnings.push(m),
 		});
 		expect(strategy).toEqual({ kind: 'besteffort', noFollowAny: 0 });
-		expect(warnings).toHaveLength(1);
-		expect(warnings[0]).toMatch(/NOT TOCTOU-safe/);
 	});
 
 	it('carries a detected whole-path no-symlink flag into the best-effort backend', async () => {
 		const strategy = await resolveLocalStrategy({
 			platform: 'darwin',
-			allowBestEffort: true,
 			probePortal: neverProbe,
 			detectNoFollowAny: async () => 0x2000_0000,
-			warn: () => {},
 		});
 		expect(strategy).toEqual({ kind: 'besteffort', noFollowAny: 0x2000_0000 });
 	});
 
-	it('Windows is unsupported, with no opt-in escape hatch', async () => {
-		for (const allowBestEffort of [false, true]) {
-			const promise = resolveLocalStrategy({
-				platform: 'win32',
-				allowBestEffort,
-				probePortal: alwaysProbe,
-			});
-			await expect(promise).rejects.toThrow(FilesError);
-			await expect(promise).rejects.toThrow(/WSL2 or a Linux devcontainer/);
-		}
+	it('uses the path backend on Windows without probing POSIX portals', async () => {
+		let probed = false;
+		const strategy = await resolveLocalStrategy({
+			platform: 'win32',
+			probePortal: async () => {
+				probed = true;
+				return true;
+			},
+		});
+		expect(strategy).toEqual({ kind: 'besteffort', noFollowAny: 0 });
+		expect(probed).toBe(false);
+	});
+});
+
+describe('Windows local path validation', () => {
+	it('accepts portable key segments', () => {
+		expect(() =>
+			validateWindowsLocalPath('reports/2026-09.csv', 'win32'),
+		).not.toThrow();
+	});
+
+	it.each([
+		'../x',
+		'a\\\\..\\\\x',
+		'a:b',
+		'NUL',
+		'NUL .txt',
+		'con.txt',
+		'CONIN$',
+		'CONOUT$.log',
+		'COM¹',
+		'COM².txt',
+		'LPT³',
+		'trailing.',
+		'.keelson-tmp-0123456789abcdef01234567',
+		'.KEELSON-TMP-0123456789ABCDEF01234567',
+	])('rejects a Windows-special local path: %s', (value) => {
+		expect(() => validateWindowsLocalPath(value, 'win32')).toThrow(
+			/Windows cannot store locally/,
+		);
+	});
+
+	it('allows ordinary names that merely share the temp prefix', () => {
+		expect(() =>
+			validateWindowsLocalPath('.keelson-tmp-user-state', 'win32'),
+		).not.toThrow();
 	});
 });
 
@@ -136,18 +170,41 @@ describe('getLocalStrategy (real resolution on this host)', () => {
 		'memoizes the resolution',
 		async () => {
 			setLocalStrategyForTests(null);
-			await withEnv(
-				{
-					KEELSON_FILES_ALLOW_BESTEFFORT_LOCAL:
-						process.platform === 'linux' ? undefined : '1',
-				},
-				async () => {
-					const a = getLocalStrategy();
-					const b = getLocalStrategy();
-					expect(a).toBe(b);
-					await a;
-				},
-			);
+			await withEnv({}, async () => {
+				const a = getLocalStrategy();
+				const b = getLocalStrategy();
+				expect(a).toBe(b);
+				await a;
+			});
+		},
+	);
+
+	it.skipIf(process.platform === 'linux')(
+		'round-trips through the default non-Linux backend without an opt-in',
+		async () => {
+			const dir = await mkdtemp(join(tmpdir(), 'keelson-files-macos-'));
+			setLocalStrategyForTests(null);
+			try {
+				await withEnv(
+					{
+						KEELSON_MODE: 'local',
+						KEELSON_FILES_DIR: dir,
+						KEELSON_FILES_ALLOW_BESTEFFORT_LOCAL: undefined,
+					},
+					async () => {
+						await write('nested/test.txt', 'hello');
+						const value = await read('nested/test.txt');
+						expect(value).not.toBeNull();
+						expect(new TextDecoder().decode(value ?? undefined)).toBe('hello');
+						expect(await list()).toEqual(['nested/test.txt']);
+						await del('nested/test.txt');
+						expect(await list()).toEqual([]);
+					},
+				);
+			} finally {
+				setLocalStrategyForTests(null);
+				await rm(dir, { recursive: true, force: true });
+			}
 		},
 	);
 });
@@ -222,29 +279,5 @@ describe('probeNoFollowAnyFlag (measured against this host)', () => {
 		// Linux, where O_NOFOLLOW has exactly that final-component-only semantic.
 		const { constants } = await import('node:fs');
 		expect(await probeNoFollowAnyFlag(constants.O_NOFOLLOW)).toBe(false);
-	});
-});
-
-describe('KEELSON_FILES_ALLOW_BESTEFFORT_LOCAL parsing', () => {
-	it('accepts 1 / true and rejects anything else', async () => {
-		const { allowBestEffortLocal } = await import('../src/config.js');
-		const cases: Array<[string | undefined, boolean]> = [
-			['1', true],
-			['true', true],
-			['TRUE', true],
-			[' 1 ', true],
-			['0', false],
-			['yes', false],
-			['', false],
-			[undefined, false],
-		];
-		for (const [value, expected] of cases) {
-			await withEnv(
-				{ KEELSON_FILES_ALLOW_BESTEFFORT_LOCAL: value },
-				async () => {
-					expect(allowBestEffortLocal()).toBe(expected);
-				},
-			);
-		}
 	});
 });

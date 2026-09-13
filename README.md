@@ -1,12 +1,11 @@
 # Keelson Node SDK
 
-Node.js SDK for building apps on the Keelson platform. Provides four packages:
+Node.js SDK for building apps on the Keelson platform. Provides three packages:
 
 > **Note**: This repository is a read-only release mirror. Development happens in the private Keelson monorepo; issues are welcome here, but pull requests are not accepted — changes land through the next release.
 
 | Package | npm | Description |
 |---------|-----|-------------|
-| [Email](./email) | [`@keelsonhq/email`](https://www.npmjs.com/package/@keelsonhq/email) | Inbound/outbound email |
 | [Media](./media) | [`@keelsonhq/media`](https://www.npmjs.com/package/@keelsonhq/media) | Media storage (upload, serve by ID) |
 | [Files](./files) | [`@keelsonhq/files`](https://www.npmjs.com/package/@keelsonhq/files) | Data files (key-addressed, overwrite, private) |
 | [Identity](./identity) | [`@keelsonhq/identity`](https://www.npmjs.com/package/@keelsonhq/identity) | User identity and directory |
@@ -19,72 +18,10 @@ Cross-language parity across Node, Python, and Go is defined by
 ## Installation
 
 ```bash
-npm install @keelsonhq/email @keelsonhq/media @keelsonhq/files @keelsonhq/identity
+npm install @keelsonhq/media @keelsonhq/files @keelsonhq/identity
 ```
 
 Install only the packages you need.
-
----
-
-## Email SDK (`@keelsonhq/email`)
-
-Send and receive email.
-
-```ts
-import * as email from "@keelsonhq/email";
-
-// Send
-await email.send({
-  to: "user@example.com",
-  subject: "Hello",
-  text: "Plain text body",
-  html: "<p>HTML body</p>",
-});
-
-// Receive inbound emails (verify + parse)
-email.onReceive(async (msg) => {
-  console.log(msg.subject, msg.from.address);
-  for (const att of msg.attachments) {
-    const data = await email.downloadAttachment(att.download_url);
-  }
-});
-
-// Handle bounce/complaint events
-email.onEvent(async (event) => {
-  if (event.event_type === "bounce") {
-    console.log("Bounced:", event.email_address);
-  }
-});
-```
-
-### Cross-language guaranteed API
-
-| Function | Description |
-|----------|-------------|
-| `send(options)` | Send an email |
-| `downloadAttachment(url)` | Download an attachment by URL |
-| `verifyWebhook(req, secret)` | Verify Svix signature and parse an inbound email request |
-| `verifyWebhookBytes(body, headers, secret)` | Verify inbound email from raw body bytes |
-| `verifyEventWebhook(req, secret)` | Verify Svix signature and parse an event request |
-| `verifyEventWebhookBytes(body, headers, secret)` | Verify event from raw body bytes |
-
-### Node-specific helpers
-
-| Function | Description |
-|----------|-------------|
-| `onReceive(handler)` | Register inbound email handler (auto-starts webhook server) |
-| `onEvent(handler)` | Register bounce/complaint event handler |
-| `serve(options?)` | Manually start the webhook server; pass `{ quiet: true }` to suppress the startup message |
-
-When `KEELSON_EMAIL_WEBHOOK_SECRET` is set, `serve()` / `onReceive()` / `onEvent()` automatically verify inbound webhooks.
-
-### Environment variables
-
-| Variable | Description |
-|----------|-------------|
-| `KEELSON_EMAIL_API_URL` | Email API endpoint (required) |
-| `KEELSON_EMAIL_TOKEN` | Bearer token (required) |
-| `KEELSON_EMAIL_WEBHOOK_SECRET` | Optional Svix signing secret for auto-verification |
 
 ---
 
@@ -149,7 +86,7 @@ await media.delete(fileId);
 | any | Exactly one of base URL / token set | **`MediaError`** — incomplete remote config |
 | `local` | — | Local filesystem (`MEDIA_DIR`, default `./media`) |
 | unset | Both Media env set | Remote (backward compatibility) |
-| unset | No Media env, platform core env visible (`KEELSON_APP_ID` / `KEELSON_TENANT_ID` / `KEELSON_DEPLOY_ID`) | **`MediaError`** — refuses silent local fallback |
+| unset | No Media env, platform core env visible (`KEELSON_APP_ID` / `KEELSON_WORKSPACE_ID` / `KEELSON_DEPLOY_ID`) | **`MediaError`** — refuses silent local fallback |
 | unset | No Media env, no platform env | Local filesystem (local development) |
 
 The SDK never silently falls back to ephemeral local storage on Keelson: set
@@ -217,11 +154,11 @@ missing config throws `FilesError`. See
 
 ## Identity SDK (`@keelsonhq/identity`)
 
-User identity and tenant directory lookup. In production, the Keelson auth
+User identity and workspace directory lookup. In production, the Keelson auth
 gateway injects trusted `X-Keelson-User-*` headers into requests before they
 reach the app.
 Use `getCurrentUser` when the basic user profile is enough; use
-`getCurrentIdentity` when the app needs tenant role, app permissions, app roles,
+`getCurrentIdentity` when the app needs workspace role, app permissions, app roles,
 or group attributes.
 
 ```ts
@@ -244,7 +181,7 @@ async function handleRequest(req, res) {
     headers: req.headers,
     app_token: process.env.KEELSON_DIRECTORY_TOKEN,
   });
-  console.log(identity.tenant.role);
+  console.log(identity.workspace.role);
   console.log(identity.app.permissions); // ["manage", "view"]
 
   // List workspace members as the app actor
@@ -275,9 +212,9 @@ async function handleRequest(req, res) {
 |----------|-------------|
 | `getCurrentUser(options?)` | Parse the current user's basic profile from trusted `X-Keelson-User-*` headers; no network call |
 | `getCurrentIdentity(options?)` | Fetch the current user's full identity as the app actor |
-| `listMembers(options?)` | List tenant members (paginated, filterable) |
+| `listMembers(options?)` | List workspace members (paginated, filterable) |
 | `getUser(userId, options?)` | Get user by ID |
-| `listGroups(options?)` | List tenant groups |
+| `listGroups(options?)` | List workspace groups |
 
 `getCurrentUser` and `getCurrentIdentity` accept `headers`, which may be a
 plain object, Node `IncomingHttpHeaders`, or WHATWG `Headers`. The required
@@ -335,7 +272,12 @@ const page2 = await listMembers();
 
 `getCurrentUser({ headers })` reads basic user fields directly from trusted
 request headers. Use `getCurrentIdentity({ headers, app_token })` when you also
-need `tenant.role`, `app.permissions`, `app.roles`, or `attributes.groups`.
+need `workspace.role`, `app.permissions`, `app.roles`, or `attributes.groups`.
+
+The former `TenantIdentity` type, `identity.tenant` property, `tenant` wire key,
+`KEELSON_TENANT_ID`, and `KEELSON_LOCAL_TENANT_ID` /
+`KEELSON_LOCAL_TENANT_ROLE` remain deprecated aliases through at least the next
+major SDK version.
 
 ### Modes
 
@@ -349,6 +291,8 @@ need `tenant.role`, `app.permissions`, `app.roles`, or `attributes.groups`.
 | Variable | Description |
 |----------|-------------|
 | `KEELSON_LOCAL_MODE` | Set to `1` for fixture data (no HTTP) |
+| `KEELSON_LOCAL_WORKSPACE_ID` | Override the local workspace ID |
+| `KEELSON_LOCAL_WORKSPACE_ROLE` | Override the local workspace role |
 | `KEELSON_DIRECTORY_BASE_URL` | **Canonical, platform-injected** base URL for Identity/Directory calls (`getCurrentIdentity` / `listMembers` / `getUser` / `listGroups`). Use this |
 | `KEELSON_DIRECTORY_TOKEN` | App token for app-as-actor Directory access; used when no explicit credential is given |
 | `KEELSON_IDENTITY_BASE_URL` | **Deprecated** compatibility fallback for the base URL (used only when `KEELSON_DIRECTORY_BASE_URL` and an explicit `base_url` are both absent). See sunset note below |
@@ -385,7 +329,6 @@ pnpm -r check
 pnpm -r test
 
 # Run tests for one package
-pnpm --filter @keelsonhq/email test
 pnpm --filter @keelsonhq/media test
 pnpm --filter @keelsonhq/identity test
 pnpm --filter @keelsonhq/files test

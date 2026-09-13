@@ -155,14 +155,60 @@ function toBytes(data: Uint8Array | string): Uint8Array {
 // final element relative to that descriptor. An ancestor swapped to a symlink
 // after a check — even mid-operation — cannot redirect the operation outside
 // the files dir. Linux always uses `/proc/self/fd`; other platforms probe at
-// runtime (see `localstrategy.ts`) and, failing that, either fail closed or use
-// the explicitly opted-in best-effort backend below. Temp files use a
-// control-char prefix (never a valid key segment); the atomic rename is
-// same-filesystem and `list` never surfaces them.
+// runtime (see `localstrategy.ts`) and use the path-based local-development
+// backend when no portal is available. Temp files use an internal prefix; the
+// atomic rename is same-filesystem and `list` never surfaces them.
 
 const TMP_PREFIX = '\x01tmp';
+const WINDOWS_TMP_PREFIX = '.keelson-tmp-';
 const O_NOFOLLOW = constants.O_NOFOLLOW ?? 0;
 const O_DIRECTORY = constants.O_DIRECTORY ?? 0;
+
+function localTempPrefix(): string {
+	return process.platform === 'win32' ? WINDOWS_TMP_PREFIX : TMP_PREFIX;
+}
+
+function localOpenNoFollowFlag(noFollowAny: number): number {
+	// macOS rejects O_NOFOLLOW | O_NOFOLLOW_ANY with EINVAL. O_NOFOLLOW_ANY
+	// already includes the final component, so the flags are alternatives.
+	return noFollowAny || O_NOFOLLOW;
+}
+
+const WINDOWS_RESERVED_STEM =
+	/^(con|prn|aux|nul|conin\$|conout\$|com[1-9¹²³]|lpt[1-9¹²³])$/i;
+const WINDOWS_INVALID_CHARS = /[<>:"\\|?*]/;
+const WINDOWS_INTERNAL_TEMP_NAME = /^\.keelson-tmp-[0-9a-f]{24}$/i;
+
+function isWindowsReservedName(segment: string): boolean {
+	// Win32 resolves the device name before the first extension and ignores
+	// spaces immediately before that extension (for example `NUL .txt`).
+	const stem = (segment.split('.', 1)[0] ?? '').replace(/ +$/, '');
+	return WINDOWS_RESERVED_STEM.test(stem);
+}
+
+/** Windows treats backslashes and several otherwise-valid key characters as
+ * path syntax. Reject those only in the Windows local backend; remote object
+ * keys retain the platform-independent API contract. */
+export function validateWindowsLocalPath(
+	value: string,
+	platform = process.platform,
+): void {
+	if (platform !== 'win32') return;
+	for (const segment of value.split('/')) {
+		if (segment === '') continue; // a trailing slash is valid for list prefixes
+		if (
+			WINDOWS_INVALID_CHARS.test(segment) ||
+			segment.endsWith('.') ||
+			segment.endsWith(' ') ||
+			isWindowsReservedName(segment) ||
+			WINDOWS_INTERNAL_TEMP_NAME.test(segment)
+		) {
+			throw new FilesError(
+				`key or prefix contains a name that Windows cannot store locally: "${segment}".`,
+			);
+		}
+	}
+}
 
 type FH = Awaited<ReturnType<typeof open>>;
 
@@ -420,16 +466,14 @@ async function listLocalFd(portal: string, prefix: string): Promise<string[]> {
 }
 
 // ---------------------------------------------------------------------------
-// Best-effort path-based backend (explicit opt-in only — see localstrategy.ts)
+// Path-based local-development backend (see localstrategy.ts)
 // ---------------------------------------------------------------------------
 //
-// Used only on a platform with no working descriptor-relative portal AND with
-// `KEELSON_FILES_ALLOW_BESTEFFORT_LOCAL=1` set. It resolves the files dir with
-// `realpath`, re-checks every key component with `lstat` (rejecting symlinks),
-// and opens the final element with `O_NOFOLLOW` (plus a whole-path no-symlink
-// flag when one was observed to work). `mkdir` / `rename` / `unlink` take no
-// such flag and Node exposes no `dir_fd`, so a check-then-act window remains:
-// this is a local-development fallback, never a confinement guarantee.
+// Used on platforms with no working descriptor-relative portal. It resolves
+// the files dir with `realpath`, re-checks every key component with `lstat`
+// (rejecting symlinks), and uses a no-symlink open flag where the OS provides
+// one. `mkdir` / `rename` / `unlink` take no such flag and Node exposes no
+// `dir_fd`, so this is intentionally scoped to local development.
 
 async function baseDirPath(create: boolean): Promise<string> {
 	const base = resolve(getFilesDir());
@@ -478,6 +522,7 @@ async function writeLocalPath(
 	key: string,
 	data: Uint8Array,
 ): Promise<void> {
+	validateWindowsLocalPath(key);
 	const { dirs, name } = splitKey(key);
 	let parent: string;
 	try {
@@ -487,14 +532,17 @@ async function writeLocalPath(
 		if (code === 'ENOTDIR' || code === 'EEXIST') throw collisionError(key);
 		throw err;
 	}
-	const tmp = join(parent, `${TMP_PREFIX}${randomBytes(12).toString('hex')}`);
+	const tmp = join(
+		parent,
+		`${localTempPrefix()}${randomBytes(12).toString('hex')}`,
+	);
+	const target = join(parent, name);
 	const tmpFh = await open(
 		tmp,
 		constants.O_WRONLY |
 			constants.O_CREAT |
 			constants.O_EXCL |
-			O_NOFOLLOW |
-			noFollowAny,
+			localOpenNoFollowFlag(noFollowAny),
 		0o644,
 	);
 	try {
@@ -504,12 +552,44 @@ async function writeLocalPath(
 			await tmpFh.close();
 		}
 		// `rename` replaces a symlink at the destination rather than following it.
-		await rename(tmp, join(parent, name));
+		// Windows rename failures can outlive a scheduler timeslice when another
+		// process (including an antivirus scanner) briefly holds the destination.
+		// Keep the retry bounded so permanent permission failures still surface.
+		const attempts = process.platform === 'win32' ? 100 : 1;
+		for (let attempt = 0; attempt < attempts; attempt++) {
+			try {
+				await rename(tmp, target);
+				break;
+			} catch (renameErr) {
+				const code = errCode(renameErr);
+				if (
+					attempt + 1 === attempts ||
+					(code !== 'EPERM' && code !== 'EACCES' && code !== 'EBUSY')
+				)
+					throw renameErr;
+				let targetStat: Awaited<ReturnType<typeof lstat>> | undefined;
+				try {
+					targetStat = await lstat(target);
+				} catch (targetErr) {
+					if (errCode(targetErr) !== 'ENOENT') throw renameErr;
+				}
+				if (targetStat?.isDirectory()) throw renameErr;
+				await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
+			}
+		}
 	} catch (err) {
 		await unlink(tmp).catch(() => {});
-		const code = errCode(err);
-		if (code === 'EISDIR' || code === 'ENOTEMPTY') throw collisionError(key);
-		throw err;
+		// Windows maps a failed directory replacement to EPERM/EACCES, while
+		// sharing and lock violations can surface as EBUSY. Classify from the
+		// destination itself instead of treating an errno as a collision.
+		try {
+			if ((await lstat(target)).isDirectory()) throw collisionError(key);
+		} catch (targetErr) {
+			if (targetErr instanceof FilesError) throw targetErr;
+			// Preserve the original rename error if the destination disappeared or
+			// cannot be inspected.
+		}
+		throw new FilesError(`write failed for key "${key}": ${String(err)}`);
 	}
 }
 
@@ -518,6 +598,7 @@ async function readLocalPath(
 	key: string,
 ): Promise<Uint8Array | null> {
 	const { dirs, name } = splitKey(key);
+	validateWindowsLocalPath(key);
 	let parent: string;
 	try {
 		parent = await descendPath(await baseDirPath(false), dirs, false);
@@ -528,9 +609,16 @@ async function readLocalPath(
 	}
 	let fh: FH;
 	try {
+		const target = join(parent, name);
+		try {
+			if ((await lstat(target)).isSymbolicLink()) throw escapeError();
+		} catch (err) {
+			if (errCode(err) === 'ENOENT') return null;
+			throw err;
+		}
 		fh = await open(
-			join(parent, name),
-			constants.O_RDONLY | O_NOFOLLOW | noFollowAny,
+			target,
+			constants.O_RDONLY | localOpenNoFollowFlag(noFollowAny),
 		);
 	} catch (err) {
 		const code = errCode(err);
@@ -550,6 +638,7 @@ async function readLocalPath(
 
 async function deleteLocalPath(key: string): Promise<void> {
 	const { dirs, name } = splitKey(key);
+	validateWindowsLocalPath(key);
 	let parent: string;
 	try {
 		parent = await descendPath(await baseDirPath(false), dirs, false);
@@ -559,25 +648,30 @@ async function deleteLocalPath(key: string): Promise<void> {
 		if (code === 'ENOENT' || code === 'ENOTDIR') return;
 		throw err;
 	}
+	const target = join(parent, name);
 	try {
-		// `unlink` never follows a symlink at the final component.
-		await unlink(join(parent, name));
+		const targetStat = await lstat(target);
+		// A directory shadows this key. A final symlink/junction is also not an
+		// SDK-owned regular file; leave it untouched.
+		if (targetStat.isDirectory() || targetStat.isSymbolicLink()) return;
 	} catch (err) {
 		const code = errCode(err);
-		if (
-			code === 'ENOENT' ||
-			code === 'ENOTDIR' ||
-			code === 'EISDIR' ||
-			code === 'EPERM' ||
-			code === 'ENOTEMPTY'
-		) {
-			return;
-		}
-		throw err;
+		if (code === 'ENOENT' || code === 'ENOTDIR') return;
+		throw new FilesError(`delete failed for key "${key}": ${String(err)}`);
+	}
+	try {
+		await unlink(target);
+	} catch (err) {
+		const code = errCode(err);
+		// Only a concurrent disappearance remains idempotent. In particular,
+		// Windows EPERM / EACCES / sharing violations must reach the caller.
+		if (code === 'ENOENT' || code === 'ENOTDIR') return;
+		throw new FilesError(`delete failed for key "${key}": ${String(err)}`);
 	}
 }
 
 async function listLocalPath(prefix: string): Promise<string[]> {
+	validateWindowsLocalPath(prefix);
 	let base: string;
 	try {
 		base = await baseDirPath(false);
@@ -594,7 +688,12 @@ async function listLocalPath(prefix: string): Promise<string[]> {
 			if (entry.isDirectory()) {
 				await walk(join(dir, entry.name), `${rel}/`);
 			} else if (entry.isFile()) {
-				if (entry.name.startsWith(TMP_PREFIX)) continue;
+				if (
+					entry.name.startsWith(TMP_PREFIX) ||
+					(process.platform === 'win32' &&
+						WINDOWS_INTERNAL_TEMP_NAME.test(entry.name))
+				)
+					continue;
 				if (rel.startsWith(prefix)) keys.push(rel);
 			}
 		}
@@ -608,10 +707,7 @@ async function listLocalPath(prefix: string): Promise<string[]> {
 // Local dispatch
 // ---------------------------------------------------------------------------
 //
-// `getLocalStrategy()` throws a typed `FilesError` on a platform where neither
-// a portal nor an opted-in fallback is available, so local mode still fails
-// closed — it just no longer fails closed on every non-Linux platform by
-// assumption.
+// `getLocalStrategy()` selects either the descriptor portal or path backend.
 
 async function writeLocal(key: string, data: Uint8Array): Promise<void> {
 	const s = await getLocalStrategy();

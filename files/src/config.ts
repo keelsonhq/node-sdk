@@ -11,7 +11,7 @@
  * ephemeral local disk):
  *
  * - `KEELSON_MODE=keelson` requires bucket + prefix + the platform identity
- *   (`KEELSON_APP_ID` / `KEELSON_TENANT_ID`); any missing → `FilesError`.
+ *   (`KEELSON_APP_ID` / `KEELSON_WORKSPACE_ID`); any missing → `FilesError`.
  * - Partial config (exactly one of bucket / prefix) → `FilesError`, any mode.
  * - `KEELSON_MODE=local` → local filesystem (`KEELSON_FILES_DIR`, default
  *   `./.keelson/files`).
@@ -51,14 +51,6 @@ export function getFilesDir(): string {
 	return process.env.KEELSON_FILES_DIR?.trim() || './.keelson/files';
 }
 
-/** Opt-in to the weaker path-based local backend on a platform with no working
- * descriptor-relative portal (see `localstrategy.ts`). Local-development escape
- * hatch only; it is never consulted in `KEELSON_MODE=keelson`. */
-export function allowBestEffortLocal(): boolean {
-	const raw = process.env.KEELSON_FILES_ALLOW_BESTEFFORT_LOCAL?.trim() ?? '';
-	return raw === '1' || raw.toLowerCase() === 'true';
-}
-
 export function getStorageBase(): string {
 	return (
 		process.env.KEELSON_FILES_STORAGE_BASE?.trim() || DEFAULT_STORAGE_BASE
@@ -75,6 +67,7 @@ export function getMode(): string {
 
 const CORE_IDENTIFIER_ENVS = [
 	'KEELSON_APP_ID',
+	'KEELSON_WORKSPACE_ID',
 	'KEELSON_TENANT_ID',
 	'KEELSON_DEPLOY_ID',
 ] as const;
@@ -85,10 +78,16 @@ export function isPlatformEnv(): boolean {
 	);
 }
 
-/** True when the tenant + app identity that composes the prefix is present. */
+/** True when the workspace + app identity that composes the prefix is present. */
 export function hasIdentity(): boolean {
-	return Boolean(
-		process.env.KEELSON_APP_ID?.trim() && process.env.KEELSON_TENANT_ID?.trim(),
+	return Boolean(process.env.KEELSON_APP_ID?.trim() && getWorkspaceId());
+}
+
+export function getWorkspaceId(): string {
+	return (
+		process.env.KEELSON_WORKSPACE_ID?.trim() ||
+		process.env.KEELSON_TENANT_ID?.trim() ||
+		''
 	);
 }
 
@@ -122,7 +121,8 @@ export function resolveMode(): ResolvedMode {
 		if (!hasIdentity()) {
 			throw new FilesError(
 				'KEELSON_MODE=keelson but the platform identity is missing ' +
-					'(KEELSON_APP_ID and KEELSON_TENANT_ID must be set); ' +
+					'(KEELSON_APP_ID and KEELSON_WORKSPACE_ID must be set; ' +
+					'KEELSON_TENANT_ID remains a deprecated alias); ' +
 					'the Files capability is unavailable for this deployment.',
 			);
 		}
@@ -135,7 +135,8 @@ export function resolveMode(): ResolvedMode {
 		if (isPlatformEnv()) {
 			throw new FilesError(
 				'Platform environment detected ' +
-					'(KEELSON_APP_ID / KEELSON_TENANT_ID / KEELSON_DEPLOY_ID set) but KEELSON_MODE is unset; ' +
+					'(KEELSON_APP_ID / KEELSON_WORKSPACE_ID (or deprecated KEELSON_TENANT_ID alias) / ' +
+					'KEELSON_DEPLOY_ID set) but KEELSON_MODE is unset; ' +
 					'refusing to fall back to local storage. Set KEELSON_MODE=local for local ' +
 					'development or KEELSON_MODE=keelson for platform storage.',
 			);

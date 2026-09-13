@@ -7,12 +7,12 @@
  * webhook server tests which use a local HTTP server.
  */
 
-import { describe, it, expect, afterEach, vi, beforeEach } from "vitest";
 import { createHmac } from "node:crypto";
 import http from "node:http";
-import { mockFetchJson, mockFetchError, withEnv } from "./helpers.js";
-import { getApiUrl, getToken, EmailError } from "../src/config.js";
-import type { InboundMessage, EmailEventPayload } from "../src/types.js";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { EmailError, getApiUrl, getEmailBaseUrl, getSendUrl, getToken } from "../src/config.js";
+import type { EmailEventPayload, InboundAttachment, InboundMessage } from "../src/types.js";
+import { mockFetchError, mockFetchJson, withEnv } from "./helpers.js";
 
 // ---------------------------------------------------------------------------
 // Config: env var guards
@@ -35,6 +35,28 @@ describe("getApiUrl", () => {
     await withEnv({ KEELSON_EMAIL_API_URL: "   " }, () => {
       expect(() => getApiUrl()).toThrow(EmailError);
     });
+  });
+});
+
+describe("getEmailBaseUrl", () => {
+  it("returns a trimmed URL without trailing slashes", async () => {
+    await withEnv({ KEELSON_EMAIL_BASE_URL: "  http://gateway.test///  " }, () => {
+      expect(getEmailBaseUrl()).toBe("http://gateway.test");
+      expect(getSendUrl()).toBe("http://gateway.test/__keelson/email/send");
+    });
+  });
+
+  it.each([undefined, "", "   "])("falls back for %j", async (baseUrl) => {
+    await withEnv(
+      {
+        KEELSON_EMAIL_BASE_URL: baseUrl,
+        KEELSON_EMAIL_API_URL: "http://legacy.test"
+      },
+      () => {
+        expect(getEmailBaseUrl()).toBeNull();
+        expect(getSendUrl()).toBe("http://legacy.test/v1/email/send");
+      }
+    );
   });
 });
 
@@ -92,18 +114,70 @@ describe("send", () => {
     await withEnv(
       {
         KEELSON_EMAIL_API_URL: "http://test-email",
+        KEELSON_EMAIL_BASE_URL: undefined,
         KEELSON_EMAIL_TOKEN: "tok"
       },
       async () => {
+        const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
         const mock = mockFetchJson({ id: "msg-1" });
         restore = mock.restore;
         const { send } = await import("../src/send.js");
         await send({ to: "a@b.com", subject: "Hi", text: "Body" });
         expect(mock.calls).toHaveLength(1);
         const req = mock.calls[0];
-        expect(req.url).toContain("/v1/email/send");
+        expect(req.url).toBe("http://test-email/v1/email/send");
         expect(req.method).toBe("POST");
         expect(req.headers.get("authorization")).toBe("Bearer tok");
+        expect(req.headers.get("content-type")).toBe("application/json");
+        expect(req.headers.get("accept")).toBe("application/json");
+        expect(await req.json()).toEqual({
+          to: ["a@b.com"],
+          subject: "Hi",
+          text: "Body"
+        });
+        expect(req.signal).toBeInstanceOf(AbortSignal);
+        expect(timeoutSpy).toHaveBeenCalledOnce();
+        expect(timeoutSpy).toHaveBeenCalledWith(30_000);
+        timeoutSpy.mockRestore();
+      }
+    );
+  });
+
+  it("uses the app-scoped gateway endpoint when configured", async () => {
+    await withEnv(
+      {
+        KEELSON_EMAIL_BASE_URL: "  http://gateway.test///  ",
+        KEELSON_EMAIL_API_URL: "http://legacy.invalid",
+        KEELSON_EMAIL_TOKEN: "tok"
+      },
+      async () => {
+        const mock = mockFetchJson({ send_id: "msg-1", status: "queued" });
+        restore = mock.restore;
+        const { send } = await import("../src/send.js");
+        await send({ to: "a@b.com", subject: "Hi", text: "Body" });
+        expect(mock.calls[0].url).toBe("http://gateway.test/__keelson/email/send");
+      }
+    );
+  });
+
+  it("keeps the legacy error message", async () => {
+    await withEnv(
+      {
+        KEELSON_EMAIL_BASE_URL: undefined,
+        KEELSON_EMAIL_API_URL: "http://test-email",
+        KEELSON_EMAIL_TOKEN: "tok"
+      },
+      async () => {
+        const mock = mockFetchError(422, '{"error":{"code":"INVALID","message":"bad"}}');
+        restore = mock.restore;
+        const { send } = await import("../src/send.js");
+        const error = await send({
+          to: "a@b.com",
+          subject: "Hi",
+          text: "Body"
+        }).catch((caught: unknown) => caught);
+        expect(error).toBeInstanceOf(EmailError);
+        expect((error as EmailError).message).toBe("Send failed [INVALID]: bad");
       }
     );
   });
@@ -188,6 +262,8 @@ function makeEventPayload(overrides: Partial<EmailEventPayload> = {}): EmailEven
     event_id: "e-1",
     event_type: "bounce",
     email_address: "fail@example.com",
+    provider: null,
+    send_id: null,
     resend_email_id: null,
     bounce_type: "hard",
     detail: "Mailbox not found",
@@ -705,6 +781,28 @@ describe("onReceive", () => {
     );
   });
 
+  it("platform env (KEELSON_WORKSPACE_ID) without a secret: fails closed (500)", async () => {
+    await withEnv(
+      {
+        KEELSON_MODE: undefined,
+        KEELSON_APP_ID: undefined,
+        KEELSON_WORKSPACE_ID: "workspace_123",
+        KEELSON_TENANT_ID: undefined,
+        KEELSON_DEPLOY_ID: undefined,
+        KEELSON_EMAIL_WEBHOOK_SECRET: undefined,
+      },
+      async () => {
+        const received: InboundMessage[] = [];
+        const port = await setup((m) => {
+          received.push(m);
+        });
+        const res = await postJSON(port, "/api/webhooks/email", makeInboundMessage());
+        expect(res.status).toBe(500);
+        expect(received).toHaveLength(0);
+      },
+    );
+  });
+
   it("KEELSON_MODE=local without a secret: accepts unsigned (local dev)", async () => {
     await withEnv({ KEELSON_MODE: "local", KEELSON_EMAIL_WEBHOOK_SECRET: undefined }, async () => {
       const received: InboundMessage[] = [];
@@ -1190,9 +1288,11 @@ describe("downloadAttachment", () => {
     await withEnv(
       {
         KEELSON_EMAIL_API_URL: "http://test-email",
+        KEELSON_EMAIL_BASE_URL: "http://gateway.must-not-be-used",
         KEELSON_EMAIL_TOKEN: "tok"
       },
       async () => {
+        const timeoutSpy = vi.spyOn(AbortSignal, "timeout");
         const binaryData = Buffer.from([0x89, 0x50, 0x4e, 0x47]);
         const original = globalThis.fetch;
         const calls: Request[] = [];
@@ -1214,7 +1314,74 @@ describe("downloadAttachment", () => {
         expect(result).toBeInstanceOf(Buffer);
         expect(result.length).toBe(4);
         expect(calls).toHaveLength(1);
+        expect(calls[0].url).toBe("http://test-email/v1/email/attachments/att-1");
+        expect(calls[0].method).toBe("GET");
         expect(calls[0].headers.get("authorization")).toBe("Bearer tok");
+        expect(calls[0].headers.get("accept")).toBe("application/octet-stream");
+        expect(calls[0].headers.get("content-type")).toBeNull();
+        expect(await calls[0].text()).toBe("");
+        expect(calls[0].signal).toBeInstanceOf(AbortSignal);
+        expect(timeoutSpy).toHaveBeenCalledOnce();
+        expect(timeoutSpy).toHaveBeenCalledWith(30_000);
+        timeoutSpy.mockRestore();
+      }
+    );
+  });
+
+  it("uses attachment id on the gateway path and ignores download_url", async () => {
+    await withEnv(
+      {
+        KEELSON_EMAIL_BASE_URL: "  http://gateway.test///  ",
+        KEELSON_EMAIL_API_URL: "http://legacy.invalid",
+        KEELSON_EMAIL_TOKEN: "tok"
+      },
+      async () => {
+        const mock = mockFetchJson({});
+        restore = mock.restore;
+        const attachment: InboundAttachment = {
+          id: "att_from_payload_id",
+          filename: "file.txt",
+          content_type: "text/plain",
+          size_bytes: 1,
+          download_url: "/v1/email/attachments/must-not-be-used"
+        };
+
+        const { downloadAttachment } = await import("../src/attachment.js");
+        await downloadAttachment(attachment);
+
+        expect(mock.calls[0].url).toBe(
+          "http://gateway.test/__keelson/email/attachments/att_from_payload_id"
+        );
+        expect(mock.calls[0].url).not.toContain("must-not-be-used");
+      }
+    );
+  });
+
+  it.each([
+    undefined,
+    "",
+    "   "
+  ])("uses payload download_url when gateway base is %j", async (baseUrl) => {
+    await withEnv(
+      {
+        KEELSON_EMAIL_BASE_URL: baseUrl,
+        KEELSON_EMAIL_API_URL: "http://legacy.test",
+        KEELSON_EMAIL_TOKEN: "tok"
+      },
+      async () => {
+        const mock = mockFetchJson({});
+        restore = mock.restore;
+        const attachment: InboundAttachment = {
+          id: "att_new_id",
+          filename: "file.txt",
+          content_type: "text/plain",
+          size_bytes: 1,
+          download_url: "/v1/email/attachments/att_legacy_id"
+        };
+
+        const { downloadAttachment } = await import("../src/attachment.js");
+        await downloadAttachment(attachment);
+        expect(mock.calls[0].url).toBe("http://legacy.test/v1/email/attachments/att_legacy_id");
       }
     );
   });
@@ -1230,9 +1397,12 @@ describe("downloadAttachment", () => {
         restore = mock.restore;
 
         const { downloadAttachment } = await import("../src/attachment.js");
-        await expect(downloadAttachment("/v1/email/attachments/missing")).rejects.toThrow(
-          /Attachment download failed/
+        const { EmailError: AttachmentEmailError } = await import("../src/config.js");
+        const error = await downloadAttachment("/v1/email/attachments/missing").catch(
+          (caught: unknown) => caught
         );
+        expect(error).toBeInstanceOf(AttachmentEmailError);
+        expect((error as Error).message).toBe("Attachment download failed (404): Not found");
       }
     );
   });
