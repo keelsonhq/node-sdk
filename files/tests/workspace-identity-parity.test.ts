@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
-import { fileURLToPath } from 'node:url';
+import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
+import { resolveParityFixturesDir } from '../../test-fixtures.js';
 import { getWorkspaceId } from '../src/config.js';
 import { withEnv } from './helpers.js';
 
@@ -11,8 +12,9 @@ interface FixtureCase {
 	expected: string | null;
 }
 
-const fixturePath = fileURLToPath(
-	new URL('../../../testdata/workspace_identity_parity.json', import.meta.url),
+const fixturePath = resolve(
+	resolveParityFixturesDir(import.meta.url),
+	'workspace_identity_parity.json',
 );
 const fixture = JSON.parse(readFileSync(fixturePath, 'utf8')) as {
 	cases: FixtureCase[];
