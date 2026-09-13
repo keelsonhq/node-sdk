@@ -9,15 +9,12 @@
  * construction those cannot be closed without a `dir_fd`.
  */
 
-import { execFile, spawn } from 'node:child_process';
 import {
-	access,
-	mkdir,
-	mkdtemp,
-	readdir,
-	rm,
-	writeFile,
-} from 'node:fs/promises';
+	type ChildProcessWithoutNullStreams,
+	execFile,
+	spawn,
+} from 'node:child_process';
+import { mkdir, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { promisify } from 'node:util';
@@ -29,6 +26,155 @@ import { withEnv } from './helpers.js';
 
 const dec = (b: Uint8Array | null) => (b ? new TextDecoder().decode(b) : null);
 const execFileAsync = promisify(execFile);
+const LOCK_HELPER_START_TIMEOUT_MS = 30_000;
+const LOCAL_TEMP_TIMEOUT_MS = 10_000;
+const LOCK_HOLD_MS = 50;
+const LOCK_HELPER_EXIT_TIMEOUT_MS = 2_000;
+const LOCK_HELPER_KILL_TIMEOUT_MS = 2_000;
+const LOCK_HELPER_CLEANUP_TIMEOUT_MS = LOCK_HELPER_KILL_TIMEOUT_MS * 2;
+const WINDOWS_LOCK_TEST_MARGIN_MS = 5_000;
+const WINDOWS_LOCK_TEST_TIMEOUT_MS =
+	LOCK_HELPER_START_TIMEOUT_MS +
+	LOCAL_TEMP_TIMEOUT_MS +
+	LOCK_HOLD_MS +
+	LOCK_HELPER_EXIT_TIMEOUT_MS +
+	LOCK_HELPER_CLEANUP_TIMEOUT_MS +
+	WINDOWS_LOCK_TEST_MARGIN_MS;
+
+function spawnWindowsLockHelper(
+	target: string,
+): ChildProcessWithoutNullStreams {
+	const script = [
+		'$stream = [IO.File]::Open($env:KEELSON_LOCK_TARGET, "Open", "Read", "Read")',
+		'[Console]::Out.WriteLine("ready")',
+		'[Console]::Out.Flush()',
+		'try { $null = [Console]::In.ReadLine() } finally { $stream.Dispose() }',
+	].join('; ');
+	return spawn('powershell.exe', ['-NoProfile', '-Command', script], {
+		env: { ...process.env, KEELSON_LOCK_TARGET: target },
+		stdio: 'pipe',
+	});
+}
+
+async function waitForLockHelper(
+	child: ChildProcessWithoutNullStreams,
+): Promise<void> {
+	await new Promise<void>((resolveReady, rejectReady) => {
+		let stdout = '';
+		const cleanup = () => {
+			clearTimeout(timeout);
+			child.stdout.off('data', onData);
+			child.off('error', onError);
+			child.off('exit', onExit);
+		};
+		const onData = (chunk: Buffer | string) => {
+			stdout += chunk.toString();
+			if (!stdout.includes('ready')) return;
+			cleanup();
+			resolveReady();
+		};
+		const onError = (error: Error) => {
+			cleanup();
+			rejectReady(error);
+		};
+		const onExit = (code: number | null) => {
+			cleanup();
+			rejectReady(new Error(`lock helper exited before ready (${code})`));
+		};
+		const timeout = setTimeout(() => {
+			cleanup();
+			rejectReady(
+				new Error(
+					`lock helper did not start within ${LOCK_HELPER_START_TIMEOUT_MS} ms`,
+				),
+			);
+		}, LOCK_HELPER_START_TIMEOUT_MS);
+		child.stdout.on('data', onData);
+		child.once('error', onError);
+		child.once('exit', onExit);
+	});
+}
+
+type LockHelperExit = { code: number | null; signal: NodeJS.Signals | null };
+
+async function waitForLockHelperExit(
+	child: ChildProcessWithoutNullStreams,
+	timeoutMs = LOCK_HELPER_EXIT_TIMEOUT_MS,
+): Promise<LockHelperExit> {
+	if (child.exitCode !== null || child.signalCode !== null) {
+		return { code: child.exitCode, signal: child.signalCode };
+	}
+	return await new Promise<LockHelperExit>((resolveExit, rejectExit) => {
+		let processError: Error | undefined;
+		const cleanup = () => {
+			clearTimeout(timeout);
+			child.off('error', onError);
+			child.off('exit', onExit);
+		};
+		const onError = (error: Error) => {
+			processError = error;
+		};
+		const onExit = (code: number | null, signal: NodeJS.Signals | null) => {
+			cleanup();
+			resolveExit({ code, signal });
+		};
+		const timeout = setTimeout(() => {
+			cleanup();
+			const detail = processError ? `: ${processError.message}` : '';
+			rejectExit(
+				new Error(`lock helper did not exit within ${timeoutMs} ms${detail}`),
+			);
+		}, timeoutMs);
+		child.once('error', onError);
+		child.once('exit', onExit);
+	});
+}
+
+async function stopLockHelper(
+	child: ChildProcessWithoutNullStreams,
+): Promise<void> {
+	if (child.exitCode !== null || child.signalCode !== null) return;
+	const killSent = child.kill();
+	try {
+		const { code, signal } = await waitForLockHelperExit(
+			child,
+			LOCK_HELPER_KILL_TIMEOUT_MS,
+		);
+		if (!killSent) {
+			throw new Error(
+				`lock helper kill failed before exit (code ${code}, signal ${signal})`,
+			);
+		}
+	} catch (error) {
+		const detail = error instanceof Error ? `: ${error.message}` : '';
+		throw new Error(
+			`failed to stop lock helper (kill returned ${killSent})${detail}`,
+		);
+	}
+}
+
+async function finishLockHelper(
+	child: ChildProcessWithoutNullStreams,
+): Promise<LockHelperExit> {
+	try {
+		return await waitForLockHelperExit(child);
+	} catch (error) {
+		await stopLockHelper(child);
+		throw error;
+	}
+}
+
+async function waitForLocalTemp(dir: string): Promise<void> {
+	const deadline = Date.now() + LOCAL_TEMP_TIMEOUT_MS;
+	while (Date.now() < deadline) {
+		if ((await readdir(dir)).some((name) => name.startsWith('.keelson-tmp-')))
+			return;
+		await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
+	}
+	throw new Error(
+		`temp file was not created within ${LOCAL_TEMP_TIMEOUT_MS} ms`,
+	);
+}
 
 async function linkDirectory(target: string, path: string): Promise<void> {
 	const { symlink } = await import('node:fs/promises');
@@ -305,46 +451,18 @@ describe('best-effort local backend', () => {
 			await withEnv(env, async () => {
 				await write('held.txt', 'keep');
 				const target = join(dir, 'held.txt');
-				const ready = join(root, 'lock-ready');
-				const script = [
-					'$stream = [IO.File]::Open($env:KEELSON_LOCK_TARGET, "Open", "Read", "Read")',
-					'[IO.File]::WriteAllText($env:KEELSON_LOCK_READY, "ready")',
-					'try { Start-Sleep -Seconds 30 } finally { $stream.Dispose() }',
-				].join('; ');
-				const child = spawn(
-					'powershell.exe',
-					['-NoProfile', '-Command', script],
-					{
-						env: {
-							...process.env,
-							KEELSON_LOCK_TARGET: target,
-							KEELSON_LOCK_READY: ready,
-						},
-						stdio: 'ignore',
-					},
-				);
+				const child = spawnWindowsLockHelper(target);
 				try {
-					for (let attempt = 0; attempt < 500; attempt++) {
-						try {
-							await access(ready);
-							break;
-						} catch {
-							if (attempt === 499) throw new Error('lock helper did not start');
-							await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
-						}
-					}
+					await waitForLockHelper(child);
 					await expect(del('held.txt')).rejects.toThrow(FilesError);
 					expect(dec(await read('held.txt'))).toBe('keep');
 				} finally {
-					child.kill();
-					await new Promise<void>((resolveExit) => {
-						child.once('exit', () => resolveExit());
-						setTimeout(resolveExit, 2000);
-					});
+					child.stdin.end('release\n');
+					await stopLockHelper(child);
 				}
 			});
 		},
-		10_000,
+		WINDOWS_LOCK_TEST_TIMEOUT_MS,
 	);
 
 	it.runIf(process.platform === 'win32')(
@@ -353,56 +471,36 @@ describe('best-effort local backend', () => {
 			await withEnv(env, async () => {
 				await write('held.txt', 'before');
 				const target = join(dir, 'held.txt');
-				const ready = join(root, 'replace-lock-ready');
-				const script = [
-					'$stream = [IO.File]::Open($env:KEELSON_LOCK_TARGET, "Open", "Read", "Read")',
-					'[IO.File]::WriteAllText($env:KEELSON_LOCK_READY, "ready")',
-					'$deadline = [DateTime]::UtcNow.AddSeconds(10)',
-					'try { while (-not (Get-ChildItem -LiteralPath $env:KEELSON_LOCK_DIR -Filter ".keelson-tmp-*" -Force)) { if ([DateTime]::UtcNow -ge $deadline) { throw "temp file was not created" }; Start-Sleep -Milliseconds 5 }; Start-Sleep -Milliseconds 40 } finally { $stream.Dispose() }',
-				].join('; ');
-				const child = spawn(
-					'powershell.exe',
-					['-NoProfile', '-Command', script],
-					{
-						env: {
-							...process.env,
-							KEELSON_LOCK_TARGET: target,
-							KEELSON_LOCK_READY: ready,
-							KEELSON_LOCK_DIR: dir,
-						},
-						stdio: 'ignore',
-					},
-				);
+				const child = spawnWindowsLockHelper(target);
 				try {
-					for (let attempt = 0; attempt < 500; attempt++) {
-						try {
-							await access(ready);
-							break;
-						} catch {
-							if (attempt === 499) throw new Error('lock helper did not start');
-							await new Promise((resolveDelay) => setTimeout(resolveDelay, 10));
-						}
-					}
-					await expect(write('held.txt', 'after')).resolves.toBeUndefined();
-					expect(dec(await read('held.txt'))).toBe('after');
-					const exitCode =
-						child.exitCode ??
-						(await new Promise<number | null>((resolveExit) => {
-							child.once('exit', (code) => resolveExit(code));
-						}));
-					expect(exitCode).toBe(0);
-				} finally {
-					if (child.exitCode === null) {
-						child.kill();
-						await new Promise<void>((resolveExit) => {
-							child.once('exit', () => resolveExit());
-							setTimeout(resolveExit, 2000);
+					await waitForLockHelper(child);
+					let settled = false;
+					let replacementError: unknown;
+					const replacement = write('held.txt', 'after')
+						.catch((error: unknown) => {
+							replacementError = error;
+						})
+						.finally(() => {
+							settled = true;
 						});
-					}
+					await waitForLocalTemp(dir);
+					await new Promise((resolveDelay) =>
+						setTimeout(resolveDelay, LOCK_HOLD_MS),
+					);
+					expect(settled).toBe(false);
+					child.stdin.end('release\n');
+					const { code, signal } = await finishLockHelper(child);
+					expect(signal).toBeNull();
+					expect(code).toBe(0);
+					await replacement;
+					expect(replacementError).toBeUndefined();
+					expect(dec(await read('held.txt'))).toBe('after');
+				} finally {
+					await stopLockHelper(child);
 				}
 			});
 		},
-		10_000,
+		WINDOWS_LOCK_TEST_TIMEOUT_MS,
 	);
 
 	it.runIf(process.platform === 'win32')(
