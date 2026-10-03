@@ -45,6 +45,12 @@ export interface MemberItem {
   email: string;
   name: string;
   role: string | null;
+  /**
+   * Profile image URL served by Clerk (`img.clerk.com`), or `null` when the
+   * member has not uploaded an image. Resize with `width` / `height` query
+   * parameters. Do not store it in your app's DB; re-fetch on display.
+   */
+  image_url: string | null;
 }
 
 export interface PaginatedMembers {

@@ -322,7 +322,9 @@ function parseMemberItem(raw: unknown): MemberItem {
   if (m.email == null) throw new IdentityError("Member item is missing 'email'.");
   if (m.name == null) throw new IdentityError("Member item is missing 'name'.");
   const role = m.role != null ? String(m.role) : null;
-  return { id, email: String(m.email), name: String(m.name), role };
+  // Older gateways omit the key; treat absent the same as null (no image).
+  const image_url = m.image_url != null ? String(m.image_url) : null;
+  return { id, email: String(m.email), name: String(m.name), role, image_url };
 }
 
 function parsePaginatedMembers(payload: Record<string, unknown>): PaginatedMembers {

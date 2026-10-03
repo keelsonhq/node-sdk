@@ -166,6 +166,7 @@ export function localListMembers(options: {
     email: m.email,
     name: m.name,
     role: m.role,
+    image_url: null,
   }));
   return {
     items,
@@ -178,7 +179,7 @@ export function localListMembers(options: {
 export function localGetUser(userId: string): MemberItem {
   for (const m of buildMembers()) {
     if (m.id === userId) {
-      return { id: m.id, email: m.email, name: m.name, role: m.role };
+      return { id: m.id, email: m.email, name: m.name, role: m.role, image_url: null };
     }
   }
   throw new IdentityError(`Identity API returned 404 (not found). user_id=${userId}`);

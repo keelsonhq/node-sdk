@@ -107,15 +107,21 @@ describe("parity: identity members", () => {
     expect(result!.limit).toBe(25);
     expect(result!.offset).toBe(0);
     expect(result!.next_offset).toBeNull();
-    expect(result!.items).toHaveLength(2);
+    expect(result!.items).toHaveLength(3);
 
     expect(result!.items[0].id).toBe("usr_m01");
     expect(result!.items[0].email).toBe("alice@example.com");
     expect(result!.items[0].name).toBe("Alice");
     expect(result!.items[0].role).toBe("admin");
+    expect(result!.items[0].image_url).toBe("https://img.clerk.com/parity-alice");
 
     expect(result!.items[1].id).toBe("usr_m02");
     expect(result!.items[1].email).toBe("bob@example.com");
+    expect(result!.items[1].image_url).toBeNull();
+
+    // Key absent (older gateway) parses to null, same as an explicit null.
+    expect(result!.items[2].id).toBe("usr_m03");
+    expect(result!.items[2].image_url).toBeNull();
   });
 });
 

@@ -362,6 +362,9 @@ describe("listMembers", () => {
       const result = await listMembers({ q: "alice" });
       expect(result.items).toHaveLength(1);
       expect(result.items[0].name).toBe("Alice (local)");
+
+      const all = await listMembers();
+      expect(all.items.every((m) => m.image_url === null)).toBe(true);
     });
   });
 
@@ -422,6 +425,19 @@ describe("getUser", () => {
     });
   });
 
+  it.each([
+    ["URL", { image_url: "https://img.clerk.com/u-1" }, "https://img.clerk.com/u-1"],
+    ["null", { image_url: null }, null],
+    ["absent key", {}, null],
+  ])("parses image_url (%s)", async (_label, extra, expected) => {
+    server = await startMockServer({ id: "u-1", email: "a@b.com", name: "A", role: "OWNER", ...extra });
+    await withEnv({ KEELSON_LOCAL_MODE: undefined, KEELSON_IDENTITY_BASE_URL: server.baseUrl }, async () => {
+      const { getUser } = await import("../src/client.js");
+      const result = await getUser("u-1");
+      expect(result.image_url).toBe(expected);
+    });
+  });
+
   it("encodes special characters in user_id", async () => {
     server = await startMockServer({ id: "a/b", email: "x@y.com", name: "X", role: null });
     await withEnv({ KEELSON_LOCAL_MODE: undefined, KEELSON_IDENTITY_BASE_URL: server.baseUrl }, async () => {
@@ -453,6 +469,7 @@ describe("getUser", () => {
       const { getUser } = await import("../src/client.js");
       const result = await getUser("local-user-002");
       expect(result.name).toBe("Alice (local)");
+      expect(result.image_url).toBeNull();
     });
   });
 
