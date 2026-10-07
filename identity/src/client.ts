@@ -11,10 +11,11 @@
 
 import http from "node:http";
 import https from "node:https";
-import { IdentityError, getDirectoryBaseUrl, isLocalMode } from "./config.js";
+import { IdentityError, assertLocalModeAllowed, getDirectoryBaseUrl, isLocalMode } from "./config.js";
 import {
   localGetCurrentIdentity,
   localGetCurrentUser,
+  localGetRequestUser,
   localGetUser,
   localListGroups,
   localListMembers
@@ -27,6 +28,7 @@ import type {
   MemberItem,
   PaginatedMembers,
   RequestOptions,
+  RequestUser,
   UserIdentity
 } from "./types.js";
 
@@ -37,6 +39,16 @@ import type {
 // App tokens used for app-as-actor Directory access are read from this env
 // var when no explicit app_token option is given.
 const DIRECTORY_TOKEN_ENV = "KEELSON_DIRECTORY_TOKEN";
+
+/**
+ * True when local mode is on. Throws when local mode is on inside a Keelson
+ * deployment (local-dev-spec §4.2).
+ */
+function useLocalMode(): boolean {
+  if (!isLocalMode()) return false;
+  assertLocalModeAllowed();
+  return true;
+}
 
 function resolveDirectoryBase(baseUrl?: string): string {
   const explicit = baseUrl?.trim().replace(/\/+$/, "");
@@ -95,48 +107,82 @@ function buildDirectoryHeaders(options: RequestOptions): Record<string, string> 
   return headers;
 }
 
-function normalizeHeaderValue(value: unknown): string | undefined {
+type Decode = (value: string) => string;
+
+const keepAsIs: Decode = (value) => value;
+
+/**
+ * Recover a UTF-8 header value that a framework handed over as latin-1 (one
+ * character per byte). Applies only when every character is U+00FF or below,
+ * at least one is U+0080 or above, and the bytes are valid UTF-8.
+ */
+const recoverUtf8: Decode = (value) => {
+  let hasHigh = false;
+  for (let i = 0; i < value.length; i++) {
+    const code = value.charCodeAt(i);
+    if (code > 0xff) return value;
+    if (code >= 0x80) hasHigh = true;
+  }
+  if (!hasHigh) return value;
+  try {
+    return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(
+      Buffer.from(value, "latin1")
+    );
+  } catch {
+    return value;
+  }
+};
+
+function normalizeHeaderValue(value: unknown, decode: Decode = keepAsIs): string | undefined {
   if (Array.isArray(value)) {
     for (const item of value) {
-      const normalized = normalizeHeaderValue(item);
+      const normalized = normalizeHeaderValue(item, decode);
       if (normalized) return normalized;
     }
     return undefined;
   }
   if (value == null) return undefined;
-  const text = String(value).trim();
+  // Decode before trimming: trim() would strip a trailing 0xA0 byte (NBSP).
+  const text = decode(String(value)).trim();
   return text || undefined;
 }
 
-function readHeader(headers: HeaderBag | undefined, name: string): string | undefined {
+function readHeader(
+  headers: HeaderBag | undefined,
+  name: string,
+  decode: Decode = keepAsIs
+): string | undefined {
   if (!headers) return undefined;
 
   const maybeGetter = (headers as { get?: unknown }).get;
   if (typeof maybeGetter === "function") {
-    return normalizeHeaderValue(maybeGetter.call(headers, name));
+    return normalizeHeaderValue(maybeGetter.call(headers, name), decode);
   }
 
   const bag = headers as Record<string, unknown>;
-  const direct = normalizeHeaderValue(bag[name]);
+  const direct = normalizeHeaderValue(bag[name], decode);
   if (direct) return direct;
   const lowerName = name.toLowerCase();
   for (const [key, value] of Object.entries(bag)) {
     if (key.toLowerCase() === lowerName) {
-      return normalizeHeaderValue(value);
+      return normalizeHeaderValue(value, decode);
     }
   }
   return undefined;
 }
 
-function parseCurrentUserHeaders(headers: HeaderBag | undefined): UserIdentity {
-  const id = readHeader(headers, "x-keelson-user-id");
+function parseCurrentUserHeaders(
+  headers: HeaderBag | undefined,
+  decode: Decode = keepAsIs
+): UserIdentity {
+  const id = readHeader(headers, "x-keelson-user-id", decode);
   if (!id) {
     throw new IdentityError("Current user headers are missing 'x-keelson-user-id'.");
   }
   return {
     id,
-    email: readHeader(headers, "x-keelson-user-email") ?? null,
-    name: readHeader(headers, "x-keelson-user-name") ?? null
+    email: readHeader(headers, "x-keelson-user-email", decode) ?? null,
+    name: readHeader(headers, "x-keelson-user-name", decode) ?? null
   };
 }
 
@@ -384,9 +430,28 @@ const DEFAULT_TIMEOUT_MS = 5_000;
  * In local mode (KEELSON_LOCAL_MODE=1), returns deterministic fixture data.
  */
 export async function getCurrentUser(options: RequestOptions = {}): Promise<UserIdentity> {
-  if (isLocalMode()) return localGetCurrentUser();
+  if (useLocalMode()) return localGetCurrentUser();
 
   return parseCurrentUserHeaders(options.headers);
+}
+
+/**
+ * Get the current user and their permissions on this app from trusted
+ * X-Keelson-User-* headers. `perms` is read from X-Keelson-User-App-Perms.
+ * Non-ASCII values that arrive as latin-1 strings are decoded as UTF-8.
+ *
+ * In local mode (KEELSON_LOCAL_MODE=1), returns the fixed local user.
+ */
+export async function getRequestUser(options: RequestOptions = {}): Promise<RequestUser> {
+  if (useLocalMode()) return localGetRequestUser();
+
+  const user = parseCurrentUserHeaders(options.headers, recoverUtf8);
+  const permsHeader = readHeader(options.headers, "x-keelson-user-app-perms", recoverUtf8) ?? "";
+  const perms = permsHeader
+    .split(",")
+    .map((p) => p.trim())
+    .filter((p) => p !== "");
+  return { ...user, perms };
 }
 
 /**
@@ -396,7 +461,7 @@ export async function getCurrentUser(options: RequestOptions = {}): Promise<User
  * the Directory identity endpoint using an app token.
  */
 export async function getCurrentIdentity(options: RequestOptions = {}): Promise<CurrentIdentity> {
-  if (isLocalMode()) return localGetCurrentIdentity();
+  if (useLocalMode()) return localGetCurrentIdentity();
 
   const user = parseCurrentUserHeaders(options.headers);
   const headers = buildCurrentIdentityHeaders(options);
@@ -418,7 +483,7 @@ export async function listMembers(options: ListMembersOptions = {}): Promise<Pag
     // client-side so local mode behaves identically.
     throw new IdentityError("Specify only one of group_id or group_key.");
   }
-  if (isLocalMode()) {
+  if (useLocalMode()) {
     return localListMembers({
       limit: options.limit,
       offset: options.offset,
@@ -449,7 +514,7 @@ export async function listMembers(options: ListMembersOptions = {}): Promise<Pag
  * Get a single user by ID.
  */
 export async function getUser(userId: string, options: RequestOptions = {}): Promise<MemberItem> {
-  if (isLocalMode()) return localGetUser(userId);
+  if (useLocalMode()) return localGetUser(userId);
 
   const uid = userId.trim();
   if (!uid) throw new IdentityError("user_id is required.");
@@ -465,7 +530,7 @@ export async function getUser(userId: string, options: RequestOptions = {}): Pro
  * List workspace groups.
  */
 export async function listGroups(options: RequestOptions = {}): Promise<GroupItem[]> {
-  if (isLocalMode()) return localListGroups();
+  if (useLocalMode()) return localListGroups();
 
   const base = resolveDirectoryBase(options.base_url);
   const headers = buildDirectoryHeaders(options);

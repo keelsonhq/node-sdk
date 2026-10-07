@@ -104,6 +104,8 @@ describe.skipIf(process.platform === 'win32')('local backend', () => {
 			{ encoding: 'utf8' },
 		);
 		expect(build.status, build.stdout).toBe(0);
+		// The emitted .js is ESM; Node 18 does not detect that without this.
+		writeFileSync(join(outDir, 'package.json'), '{"type":"module"}\n');
 		const script = join(tmp.path, 'run.mjs');
 		writeFileSync(
 			script,

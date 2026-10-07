@@ -13,6 +13,14 @@ export interface UserIdentity {
   name: string | null;
 }
 
+/**
+ * The current user plus their permissions on this app, read from the trusted
+ * `X-Keelson-User-*` headers by `getRequestUser`. `perms` comes from
+ * `X-Keelson-User-App-Perms` (e.g. `["view"]` or `["view", "manage"]`) and is
+ * empty when the header is absent (machine / webhook requests).
+ */
+export type RequestUser = UserIdentity & { perms: string[] };
+
 export interface WorkspaceIdentity {
   id: string;
   role: string;

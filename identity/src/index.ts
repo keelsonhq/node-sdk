@@ -48,6 +48,7 @@
 export {
 	getCurrentIdentity,
 	getCurrentUser,
+	getRequestUser,
 	getUser,
 	listGroups,
 	listMembers,
@@ -64,6 +65,7 @@ export type {
 	MemberItem,
 	PaginatedMembers,
 	RequestOptions,
+	RequestUser,
 	TenantIdentity,
 	UserIdentity,
 	WorkspaceIdentity,
