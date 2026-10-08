@@ -2,12 +2,13 @@
 
 SDK guide: https://keelson.dev/docs/building-apps/sdk/
 
-Node.js SDK for building apps on the Keelson platform. Provides four packages:
+Node.js SDK for building apps on the Keelson platform. Provides five packages:
 
 > **Note**: This repository is a read-only release mirror. Development happens in the private Keelson monorepo; issues are welcome here, but pull requests are not accepted — changes land through the next release.
 
 | Package | npm | Description |
 |---------|-----|-------------|
+| [Email](./email) | [`@keelsonhq/email`](https://www.npmjs.com/package/@keelsonhq/email) | Outbound email and delivery events |
 | [Media](./media) | [`@keelsonhq/media`](https://www.npmjs.com/package/@keelsonhq/media) | Media storage (upload, serve by ID) |
 | [Files](./files) | [`@keelsonhq/files`](https://www.npmjs.com/package/@keelsonhq/files) | Data files (key-addressed, overwrite, private) |
 | [Identity](./identity) | [`@keelsonhq/identity`](https://www.npmjs.com/package/@keelsonhq/identity) | User identity and directory |
@@ -21,10 +22,127 @@ Cross-language parity across Node, Python, and Go is defined by
 ## Installation
 
 ```bash
-npm install @keelsonhq/media @keelsonhq/files @keelsonhq/identity
+npm install @keelsonhq/email @keelsonhq/media @keelsonhq/files @keelsonhq/identity
 ```
 
 Install only the packages you need.
+
+---
+
+## Email SDK (`@keelsonhq/email`)
+
+Send email to your app's users and receive delivery events (delivered /
+bounce / complaint). Keelson injects the endpoint, token, and webhook signing
+secret at deploy time; no `keelson.yaml` setting is needed. Full guide:
+https://keelson.dev/docs/building-apps/external-integrations/#send-email
+
+```ts
+import * as email from "@keelsonhq/email";
+
+const result = await email.send({
+  to: "user@example.com",
+  subject: "Request received",
+  text: "We received request 1234.",
+});
+// Store result.send_id to match it with delivery events later
+console.log(result.send_id, result.status);
+```
+
+Sending rules:
+
+- The sender is always `<app-slug>@mail.keelson.run`. `from_name` and
+  `reply_to` can be set; custom sender domains are not available
+- Send only business communication to your app's users
+  ([Acceptable Use Policy](https://keelson.dev/aup/) 2.3). Marketing
+  campaigns and sending to people who do not use the app are not allowed
+- Up to 50 recipients per message (To + CC + BCC). At least one of `text` or
+  `html` is required
+- Up to 30 sends per 60 seconds, per app and per workspace
+- Monthly recipient limits depend on the plan and are counted per app and per
+  workspace ([Plans and limits](https://keelson.dev/docs/workspace/plans-and-limits/))
+- Inbound email is not available
+
+A rejected send throws `EmailError`; the message includes the error code.
+
+| HTTP | Error code | Meaning |
+|------|------------|---------|
+| 400 | `RECIPIENT_SUPPRESSED` | A recipient is on the workspace suppression list |
+| 403 | `EMAIL_SENDING_SUSPENDED` | Sending is suspended for the workspace (too many permanent bounces or complaints). Contact Keelson to lift it |
+| 422 | `RECIPIENT_LIMIT_EXCEEDED` | More than 50 recipients |
+| 429 | `RATE_LIMIT_EXCEEDED` | 60-second send limit reached. Retry later |
+| 429 | `MONTHLY_QUOTA_EXCEEDED` | Monthly recipient limit reached |
+| 429 | `GLOBAL_RATE_LIMIT_EXCEEDED` / `GLOBAL_DAILY_QUOTA_EXCEEDED` | Platform-wide sending volume limit reached. Retry later |
+| 502 | `SEND_OUTCOME_UNKNOWN` | Outcome could not be confirmed; the message may have been sent. Do not retry automatically |
+
+### Delivery events
+
+Keelson posts signed delivery events to your app at
+`POST /api/webhooks/email-events`. Verify the signature with
+`KEELSON_EMAIL_WEBHOOK_SECRET` over the raw request body, then match the
+event to your send record with `send_id`.
+
+```ts
+import express from "express";
+import * as email from "@keelsonhq/email";
+
+const app = express();
+
+app.post(
+  "/api/webhooks/email-events",
+  express.raw({ type: "*/*" }),
+  (req, res) => {
+    const event = email.verifyEventWebhookBytes(
+      req.body,
+      req.headers,
+      process.env.KEELSON_EMAIL_WEBHOOK_SECRET!,
+    );
+    if (event.event_type === "bounce" && event.bounce_type === "hard") {
+      // Look up the send by event.send_id and mark event.email_address invalid
+    }
+    res.sendStatus(204);
+  },
+);
+```
+
+Event fields: `event_id`, `event_type` (`delivered` / `bounce` /
+`complaint`), `email_address`, `send_id`, `bounce_type` (`hard` / `soft`,
+bounces only), `detail`, `provider`, `timestamp`. Delivery is at-least-once;
+use `event_id` to detect duplicates.
+
+Permanent bounces and complaints add the address to the workspace
+suppression list automatically, whether or not the app handles the event.
+After that, no app in the workspace can send to it (`RECIPIENT_SUPPRESSED`).
+Owners and Admins can review the list under Email in the console's workspace
+settings.
+
+### Cross-language guaranteed API
+
+| Function | Description |
+|----------|-------------|
+| `send(options)` | Send an email; resolves to `{ send_id, status }` |
+| `verifyEventWebhook(req, secret)` | Verify Svix signature and parse an event request |
+| `verifyEventWebhookBytes(body, headers, secret)` | Verify event from raw body bytes |
+| `setIdempotencyStore(store)` | Plug in a shared store to suppress duplicate deliveries across instances |
+
+### Node-specific helpers
+
+| Function | Description |
+|----------|-------------|
+| `onEvent(handler)` | Register an event handler and start a standalone webhook server on `PORT` |
+| `serve(options?)` | Manually start the webhook server; pass `{ quiet: true }` to suppress the startup message |
+
+`onEvent()` / `serve()` start their own HTTP server, so use them only when the
+app has no other server listening on `PORT`. They verify signatures
+automatically with `KEELSON_EMAIL_WEBHOOK_SECRET`.
+
+### Environment variables
+
+| Variable | Description |
+|----------|-------------|
+| `KEELSON_EMAIL_API_URL` | Email API endpoint (injected) |
+| `KEELSON_EMAIL_TOKEN` | Bearer token for sending (injected) |
+| `KEELSON_EMAIL_WEBHOOK_SECRET` | Signing secret for delivery events (injected) |
+| `KEELSON_EMAIL_BASE_URL` | Optional app-scoped endpoint. When set, the SDK prefers it over `KEELSON_EMAIL_API_URL` |
 
 ---
 
@@ -525,6 +643,7 @@ pnpm -r check
 pnpm -r test
 
 # Run tests for one package
+pnpm --filter @keelsonhq/email test
 pnpm --filter @keelsonhq/media test
 pnpm --filter @keelsonhq/identity test
 pnpm --filter @keelsonhq/files test
